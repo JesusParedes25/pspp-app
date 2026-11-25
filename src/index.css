@@ -1,0 +1,125 @@
+/**
+ * ARCHIVO: index.css
+ * PROPÓSITO: Estilos globales y directivas de Tailwind CSS.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    /* Reserva siempre el carril de la barra de scroll, para que aparecer o
+     * desaparecer no cambie el ancho disponible ni provoque un reflujo del
+     * contenido. Cuesta los 5px de la barra personalizada de abajo.
+     * (Medida preventiva: el "scroll jitter" que se reportó resultó ser
+     * otra cosa — ver el comentario de la barra compacta en
+     * DetalleProyecto.jsx — pero este carril evita esa familia de bucles.) */
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    /* gob.mx v3: Noto Sans, #545454 text, #F5F5F0 background */
+    background-color: #F5F5F0;
+    color: #545454;
+    font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 16px;
+    line-height: 1.428;
+  }
+
+  /* Primer toque "muerto" en tablet (hay que tocar dos veces para que un
+   * link/botón responda): WebKit/Chrome móvil, sin esto, a veces usan el
+   * primer toque sobre un elemento con estilos :hover para simular ese
+   * hover (como lo haría un mouse) y recién el segundo toque dispara el
+   * click real — exactamente el síntoma reportado en los atajos de la
+   * Portada y en la subnavegación de Configuración, ambos con
+   * hover:-algo pero sin esto. touch-action: manipulation le dice al
+   * navegador que no hay ambigüedad que resolver (nada de doble-tap-para-
+   * zoom aquí) y conviene tratar el primer toque como el click real.
+   * No se aplica a todo el documento (seguiría permitiendo pellizcar/zoom
+   * donde haga falta, p. ej. el mapa) — solo a los elementos realmente
+   * interactivos. */
+  a, button, [role="button"] {
+    touch-action: manipulation;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-weight: 700;
+    color: #545454;
+  }
+
+  /* Scrollbar personalizada para la app */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #F5F5F0;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #E5E5E5;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #98989A;
+  }
+}
+
+@layer components {
+  /* Chip de etiqueta reutilizable */
+  .chip {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold;
+  }
+
+  /* Card base — gob.mx: flat, subtle border, minimal shadow */
+  .card {
+    background-color: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #E5E5E5;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  }
+
+  /* Input base */
+  .input-base {
+    @apply w-full px-3 py-2 text-sm
+           focus:outline-none focus:ring-2 focus:ring-guinda-500 focus:border-guinda-500;
+    border: 1px solid #E5E5E5;
+    border-radius: 6px;
+    color: #545454;
+    background-color: #ffffff;
+  }
+  .input-base::placeholder {
+    color: #98989A;
+  }
+
+  /* Botón primario guinda — gob.mx: flat, no shadow, rounded-md */
+  .btn-primary {
+    @apply px-4 py-2 text-white text-sm font-semibold transition-colors
+           disabled:opacity-50 disabled:cursor-not-allowed;
+    background-color: #7B1C3E;
+    border-radius: 6px;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background-color: #611232;
+  }
+
+  /* Botón secundario */
+  .btn-secondary {
+    @apply px-4 py-2 text-sm font-semibold transition-colors;
+    background-color: #ffffff;
+    color: #7B1C3E;
+    border: 1px solid #7B1C3E;
+    border-radius: 6px;
+  }
+  .btn-secondary:hover {
+    background-color: #fbf3f6;
+  }
+
+  /* Botón verde */
+  .btn-verde {
+    @apply px-4 py-2 bg-verde-500 text-white text-sm font-semibold
+           hover:bg-verde-600 transition-colors
+           disabled:opacity-50 disabled:cursor-not-allowed;
+    border-radius: 6px;
+  }
+}

@@ -1,0 +1,158 @@
+/**
+ * ARCHIVO: proyectos.js
+ * PROPÓSITO: Funciones de API para proyectos y proyecto_dgs.
+ *
+ * NOTA TÉCNICA: Parámetros de query en GET requests
+ * ─────────────────────────────────────────────────────────────────
+ * axios convierte el objeto { params } en query string automáticamente:
+ * { estado: 'En_proceso', pagina: 1 } → ?estado=En_proceso&pagina=1
+ * Los parámetros undefined se omiten automáticamente, lo que permite
+ * pasar filtros opcionales sin lógica condicional adicional.
+ * ─────────────────────────────────────────────────────────────────
+ */
+import client from './client';
+import { subirArchivo, conTiempoDeProceso } from './transferencias';
+import { nombreDeContentDisposition } from '../utils/nombreDescarga';
+
+export async function listarProyectos(filtros = {}) {
+  const { data } = await client.get('/proyectos', { params: filtros });
+  return data;
+}
+
+// Qué puede hacer el usuario actual en este proyecto, según el servidor:
+// editar la ficha, capturar, eliminar, designar participantes, y en qué
+// nodos concretos puede capturar si su acceso es parcial.
+export async function obtenerMisPermisos(id) {
+  const { data } = await client.get(`/proyectos/${id}/mis-permisos`);
+  return data.datos;
+}
+
+export async function obtenerProyecto(id) {
+  const { data } = await client.get(`/proyectos/${id}`);
+  return data;
+}
+
+// Descarga la estructura completa del proyecto (Etapa → Acción →
+// Subacción → Tarea) como archivo .xlsx o .csv. El nombre del archivo lo
+// arma el propio servidor y llega en el header Content-Disposition — se
+// extrae de ahí en vez de reconstruirlo aquí, para que quede idéntico al
+// que ya sanitizó el backend (sin repetir esa lógica en el frontend).
+export async function exportarProyecto(id, formato = 'xlsx') {
+  // El servidor arma el Excel antes de contestar: límite de proceso (5 min),
+  // no el de 30 s de una petición normal.
+  const response = await client.get(`/proyectos/${id}/exportar`, conTiempoDeProceso({
+    params: { formato },
+    responseType: 'blob',
+  }));
+
+  const nombreArchivo = nombreDeContentDisposition(
+    response.headers['content-disposition'], `proyecto.${formato}`);
+
+  const url = URL.createObjectURL(response.data);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nombreArchivo;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function crearProyecto(datos) {
+  const { data } = await client.post('/proyectos', datos);
+  return data;
+}
+
+export async function actualizarProyecto(id, datos) {
+  const { data } = await client.put(`/proyectos/${id}`, datos);
+  return data;
+}
+
+export async function eliminarProyecto(id) {
+  const { data } = await client.delete(`/proyectos/${id}`);
+  return data;
+}
+
+export async function listarProyectosEliminados() {
+  const { data } = await client.get('/proyectos/eliminados');
+  return data;
+}
+
+export async function restaurarProyecto(id) {
+  const { data } = await client.patch(`/proyectos/${id}/restaurar`);
+  return data;
+}
+
+export async function purgarProyecto(id) {
+  const { data } = await client.delete(`/proyectos/${id}/purgar`);
+  return data;
+}
+
+export async function obtenerDGsProyecto(id) {
+  const { data } = await client.get(`/proyectos/${id}/dgs`);
+  return data;
+}
+
+export async function obtenerEtiquetasProyecto(id) {
+  const { data } = await client.get(`/proyectos/${id}/etiquetas`);
+  return data;
+}
+
+// Bitácora real del proyecto (actividad_log) — a diferencia de las
+// notificaciones, aquí SÍ aparecen los cambios hechos por el propio
+// usuario que los generó (notificarEquipoProyecto excluye al actor).
+export async function obtenerActividadRecienteProyecto(id) {
+  const { data } = await client.get(`/proyectos/${id}/actividad-reciente`);
+  return data.datos;
+}
+
+// Bloque 3.2 (navegación del árbol): etapas/acciones/tareas que el
+// Cronograma no puede dibujar como barra por falta de fecha.
+export async function obtenerActividadesSinFecha(id) {
+  const { data } = await client.get(`/proyectos/${id}/actividades-sin-fecha`);
+  return data.datos;
+}
+
+// Pestaña "Bitácora" — TODO lo que pasa en el proyecto (comentarios,
+// archivos, riesgos, avance/estatus, miembros, indicadores), paginado y
+// filtrable. A diferencia de obtenerActividadRecienteProyecto (widget
+// chico, 50 filas fijas, solo actividad_log), esta combina las fuentes
+// reales sin duplicar — ver bitacora.queries.js en el backend.
+export async function obtenerBitacoraProyecto(id, { categoria, usuarioId, desde, hasta, busqueda, etapaId, accionId, tareaId, pagina, limite } = {}) {
+  const { data } = await client.get(`/proyectos/${id}/bitacora`, {
+    params: { categoria, usuarioId, desde, hasta, busqueda, etapaId, accionId, tareaId, pagina, limite },
+  });
+  return data;
+}
+
+// Portada del proyecto — todos los contadores de las fichas (Seguimiento,
+// Resumen, Documentos, Bitácora, Configuración) en una sola llamada. La
+// Portada es la primera pantalla que se ve al abrir un proyecto; nunca
+// debe depender de 5+ llamadas por separado.
+export async function obtenerPortadaResumen(id) {
+  const { data } = await client.get(`/proyectos/${id}/portada-resumen`);
+  return data.datos;
+}
+
+// URL de la portada de un proyecto, o null si no tiene. El backend manda
+// `imagen_url` como "/api/v1/proyectos/:id/imagen" (ruta fija), que solo
+// sirve si la API vive en /api/v1 de la raíz del dominio. Se arma aquí
+// contra la misma base que usa el resto de las llamadas (VITE_API_URL),
+// para que funcione igual si la institución publica la API bajo otro
+// prefijo (p. ej. /pspp/api/v1). La imagen siempre pasa por el backend.
+export function urlImagenProyecto(proyecto) {
+  if (!proyecto?.imagen_url || !proyecto.id) return null;
+  return `${client.defaults.baseURL}/proyectos/${proyecto.id}/imagen`;
+}
+
+export async function subirImagenProyecto(id, archivo, opciones = {}) {
+  const formData = new FormData();
+  formData.append('imagen', archivo);
+  return subirArchivo(`/proyectos/${id}/imagen`, formData, archivo, opciones);
+}
+
+// Crea un proyecto nuevo copiando la estructura de `id`.
+// `incluir` es { fechas, territorio, indicadores, participantes, archivos }.
+export async function duplicarProyecto(id, { nombre, incluir }) {
+  // Con "Archivos adjuntos" copia cada objeto en el almacén: límite de proceso.
+  const { data } = await client.post(`/proyectos/${id}/duplicar`, { nombre, incluir }, conTiempoDeProceso());
+  return data;
+}

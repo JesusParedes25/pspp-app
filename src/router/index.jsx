@@ -1,0 +1,93 @@
+/**
+ * ARCHIVO: router/index.jsx
+ * PROPÓSITO: Definición de todas las rutas de la aplicación con React Router.
+ *
+ * NOTA TÉCNICA: React Router y SPA navigation
+ * ─────────────────────────────────────────────────────────────────
+ * En una SPA (Single Page Application), el navegador no recarga la
+ * página al cambiar de ruta. React Router intercepta los clicks en
+ * links y renderiza el componente correspondiente sin hacer una
+ * petición HTTP al servidor. El Layout envuelve todas las rutas
+ * protegidas para mantener sidebar y header visibles. La ruta "*"
+ * captura URLs no definidas y muestra NotFound — antes redirigía en
+ * silencio al inicio, sin avisar que el enlace no lleva a ningún lado.
+ * ─────────────────────────────────────────────────────────────────
+ */
+import { Routes, Route, Navigate } from 'react-router-dom';
+import Layout from '../components/layout/Layout';
+import Inicio from '../pages/Inicio';
+import Tablero from '../pages/Tablero';
+import ListadoProyectos from '../pages/proyectos/ListadoProyectos';
+import NuevoProyecto from '../pages/proyectos/NuevoProyecto';
+import DetalleProyectoLayout from '../pages/proyectos/DetalleProyectoLayout';
+import PortadaProyecto from '../pages/proyectos/PortadaProyecto';
+import SeguimientoProyecto from '../pages/proyectos/SeguimientoProyecto';
+import ResumenProyecto from '../pages/proyectos/ResumenProyecto';
+import DocumentosProyecto from '../pages/proyectos/DocumentosProyecto';
+import BitacoraProyectoPage from '../pages/proyectos/BitacoraProyectoPage';
+import ConfiguracionProyecto from '../pages/proyectos/ConfiguracionProyecto';
+import RiesgosProyecto from '../pages/proyectos/RiesgosProyecto';
+import IndicadoresProyecto from '../pages/proyectos/IndicadoresProyecto';
+import CarteraDetalle from '../pages/carteras/CarteraDetalle';
+import MisActividades from '../pages/MisActividades';
+import Evidencias from '../pages/Evidencias';
+import Notificaciones from '../pages/Notificaciones';
+import MapaTerritorial from '../pages/MapaTerritorial';
+import Indicadores from '../pages/Indicadores';
+import DetalleIndicador from '../pages/indicadores/DetalleIndicador';
+import DetalleCatalogo from '../pages/indicadores/DetalleCatalogo';
+import AdminCatalogos from '../pages/AdminCatalogos';
+import GuiaDeUso from '../pages/GuiaDeUso';
+import ActivarCuenta from '../pages/ActivarCuenta';
+import NotFound from '../pages/NotFound';
+
+export default function AppRouter() {
+  return (
+    <Routes>
+      {/* Ruta pública fuera del layout autenticado */}
+      <Route path="activar-cuenta" element={<ActivarCuenta />} />
+      {/* /login no es una pantalla propia de la app autenticada — App.jsx ya
+          decide mostrar <Login/> en vez de este router cuando no hay sesión.
+          Esta ruta solo existe para el caso en que SÍ hay sesión y aun así se
+          llega a /login (justo después de iniciar sesión, cuando App.jsx
+          cambia de <Login/> a este router sin que cambie la URL, o por
+          entrar a mano estando ya autenticado): antes caía en el comodín "*"
+          de abajo y mostraba Página no encontrada. */}
+      <Route path="login" element={<Navigate to="/" replace />} />
+      <Route element={<Layout />}>
+        <Route index element={<Inicio />} />
+        <Route path="tablero" element={<Tablero />} />
+        <Route path="proyectos" element={<ListadoProyectos />} />
+        <Route path="proyectos/nuevo" element={<NuevoProyecto />} />
+        <Route path="proyectos/:id" element={<DetalleProyectoLayout />}>
+          <Route index element={<PortadaProyecto />} />
+          <Route path="seguimiento" element={<SeguimientoProyecto />} />
+          <Route path="resumen" element={<ResumenProyecto />} />
+          <Route path="documentos" element={<DocumentosProyecto />} />
+          <Route path="bitacora" element={<BitacoraProyectoPage />} />
+          <Route path="configuracion" element={<ConfiguracionProyecto />} />
+          <Route path="riesgos" element={<RiesgosProyecto />} />
+          <Route path="indicadores" element={<IndicadoresProyecto />} />
+        </Route>
+        <Route path="carteras/:id" element={<CarteraDetalle />} />
+        <Route path="mapa" element={<MapaTerritorial />} />
+        <Route path="indicadores" element={<Indicadores />} />
+        <Route path="indicadores/catalogo/:id" element={<DetalleCatalogo />} />
+        <Route path="indicadores/:id" element={<DetalleIndicador />} />
+        {/* /agenda era una ruta propia de antes de "Mis actividades" (PR
+            #157) — Agenda.jsx quedó embebido ahí como pestaña
+            (/mis-actividades?tab=agenda, ya con su entrada en el sidebar) y
+            esta ruta quedó sin ningún enlace apuntándole. Se deja como
+            redirect, no se borra sin más, por si alguien la tenía como
+            favorito desde antes del cambio. */}
+        <Route path="agenda" element={<Navigate to="/mis-actividades?tab=agenda" replace />} />
+        <Route path="mis-actividades" element={<MisActividades />} />
+        <Route path="evidencias" element={<Evidencias />} />
+        <Route path="notificaciones" element={<Notificaciones />} />
+        <Route path="admin/catalogos" element={<AdminCatalogos />} />
+        <Route path="guia-de-uso" element={<GuiaDeUso />} />
+        <Route path="*" element={<NotFound />} />
+      </Route>
+    </Routes>
+  );
+}

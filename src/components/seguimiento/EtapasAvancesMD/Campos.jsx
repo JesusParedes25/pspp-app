@@ -1,0 +1,350 @@
+/**
+ * ARCHIVO: Campos.jsx
+ * PROPÓSITO: Campos editables inline reutilizados por el rail de
+ *            "Propiedades" (PanelDetalle) — texto, select, avance,
+ *            semáforo y el selector múltiple de municipios.
+ */
+import { useState, useEffect, useRef } from 'react';
+import { Lock, Pencil } from 'lucide-react';
+import { COLORES_SEMAFORO, CHIP_BG, URGENCIA_SEMAFORO } from '../../common/SemaforoDot';
+
+// ─── Campo texto inline (click-to-edit) ──────────────────────
+// iconoEditar: lápiz visible junto al valor — sin esto, la única señal de
+// que el texto es editable es el cursor+hover+title al pasar el mouse, que
+// resultó no ser descubrible (un campo así, sin nada que lo distinga de
+// texto plano, se reportó como "no se puede editar").
+// requerido: si se confirma vacío, revierte al valor anterior sin llamar
+// onGuardar (mismo camino que Escape) — evita mandar NULL a una columna
+// NOT NULL (nombre en etapas/acciones/tareas) y que el guardado truene.
+export function CampoTextoInline({ valor, onGuardar, soloLectura, placeholder, className, multiline, maxLength, iconoEditar, requerido }) {
+  const [editando, setEditando] = useState(false);
+  const [texto, setTexto] = useState(valor || '');
+  const ref = useRef(null);
+
+  useEffect(() => { setTexto(valor || ''); }, [valor]);
+  useEffect(() => { if (editando && ref.current) ref.current.focus(); }, [editando]);
+
+  function confirmar() {
+    const limpio = texto.trim();
+    if (requerido && !limpio) {
+      setTexto(valor || '');
+      setEditando(false);
+      return;
+    }
+    setEditando(false);
+    if (limpio !== (valor || '').trim()) onGuardar(limpio || null);
+  }
+
+  if (soloLectura || !editando) {
+    return (
+      <div
+        onClick={() => !soloLectura && setEditando(true)}
+        className={`${className} ${!soloLectura ? 'cursor-pointer hover:bg-gray-50 rounded px-1 -mx-1' : ''} ${!valor && !soloLectura ? 'italic text-gray-300' : ''} ${iconoEditar ? 'inline-flex items-center gap-1.5' : ''}`}
+        title={!soloLectura ? 'Clic para editar' : undefined}
+      >
+        <span>{valor || placeholder || '-'}</span>
+        {iconoEditar && !soloLectura && <Pencil size={12} className="text-gray-300 flex-shrink-0" />}
+      </div>
+    );
+  }
+
+  if (multiline) {
+    return (
+      <textarea
+        ref={ref}
+        value={texto}
+        onChange={e => setTexto(e.target.value)}
+        onBlur={confirmar}
+        onKeyDown={e => { if (e.key === 'Escape') { setTexto(valor || ''); setEditando(false); } }}
+        placeholder={placeholder}
+        rows={2}
+        className={`${className} w-full border border-[#7B1C3E]/30 rounded px-1.5 py-0.5 outline-none focus:ring-1 focus:ring-[#7B1C3E]/20 resize-none`}
+      />
+    );
+  }
+
+  return (
+    <input
+      ref={ref}
+      value={texto}
+      onChange={e => setTexto(e.target.value)}
+      onBlur={confirmar}
+      onKeyDown={e => { if (e.key === 'Enter') confirmar(); if (e.key === 'Escape') { setTexto(valor || ''); setEditando(false); } }}
+      placeholder={placeholder}
+      maxLength={maxLength}
+      className={`${className} w-full border border-[#7B1C3E]/30 rounded px-1.5 py-0.5 outline-none focus:ring-1 focus:ring-[#7B1C3E]/20`}
+    />
+  );
+}
+
+// ─── Campos editables inline ───────────────────────────────────
+export function CampoEditable({ label, valor }) {
+  return (
+    <div>
+      <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">{label}</span>
+      <span className="text-xs text-gray-700">{valor}</span>
+    </div>
+  );
+}
+
+// `variante="chip"`: mismo campo, mismo onChange, mismo soloLectura — solo
+// se pinta como una píldora compacta (etiqueta + valor en una línea) en
+// vez de etiqueta arriba + caja abajo. Pensado para la fila de resumen
+// (Estatus · Prioridad) donde varios campos van uno al lado del otro.
+export function CampoSelect({ label, valor, opciones, onChange, soloLectura, formatLabel, useObjects, variante, autoFocus }) {
+  const displayVal = useObjects
+    ? (opciones.find(o => o.value === valor)?.label || valor || '-')
+    : (formatLabel ? formatLabel(valor) : valor || '-');
+
+  if (variante === 'chip') {
+    return (
+      <div className="inline-flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-full pl-2.5 pr-1.5 py-1">
+        <span className="text-[10px] text-gray-400 font-medium flex-shrink-0">{label}</span>
+        {soloLectura ? (
+          <span className="text-xs font-medium text-gray-700">{displayVal}</span>
+        ) : (
+          <select
+            value={valor}
+            onChange={e => onChange(e.target.value)}
+            autoFocus={autoFocus}
+            className="text-xs font-medium text-gray-700 bg-transparent border-none outline-none cursor-pointer max-w-[110px]"
+          >
+            <option value="">-</option>
+            {useObjects
+              ? opciones.map(o => <option key={o.value} value={o.value}>{o.label}</option>)
+              : opciones.map(o => <option key={o} value={o}>{formatLabel ? formatLabel(o) : o}</option>)
+            }
+          </select>
+        )}
+      </div>
+    );
+  }
+
+  if (soloLectura) return <CampoEditable label={label} valor={displayVal} soloLectura />;
+  return (
+    <div>
+      <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">{label}</span>
+      <select
+        value={valor}
+        onChange={e => onChange(e.target.value)}
+        className="text-xs border border-gray-200 rounded px-1.5 py-0.5 w-full bg-white focus:border-[#7B1C3E] outline-none"
+      >
+        <option value="">-</option>
+        {useObjects
+          ? opciones.map(o => <option key={o.value} value={o.value}>{o.label}</option>)
+          : opciones.map(o => <option key={o} value={o}>{formatLabel ? formatLabel(o) : o}</option>)
+        }
+      </select>
+    </div>
+  );
+}
+
+// Selector múltiple de municipios (mismo patrón que TerritorioSelector.jsx,
+// duplicado aquí porque este panel usa su propio CampoSelect/CampoEditable).
+// La lista seleccionada puede acumular municipios de distintos estados —
+// el <select> de Estado de arriba solo filtra qué se muestra para buscar,
+// no borra lo ya elegido en otros estados. Cada chip muestra su estado
+// entre paréntesis para no confundir municipios del mismo nombre.
+export function SelectorMunicipiosMultiple({ municipios, opciones, onChange, soloLectura, estadosCatalog = [] }) {
+  const lista = municipios || [];
+  const seleccionados = new Set(lista.map(m => m.cve_mun));
+  const [busqueda, setBusqueda] = useState('');
+
+  const nombreEstado = (cveMun) => estadosCatalog.find(e => e.cve_ent === cveMun.slice(0, 2))?.nombre;
+
+  if (soloLectura) {
+    return (
+      <div>
+        <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">Municipios</span>
+        {lista.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {lista.map(m => (
+              <span key={m.cve_mun} className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full">
+                {m.nombre}{nombreEstado(m.cve_mun) ? ` (${nombreEstado(m.cve_mun)})` : ''}
+              </span>
+            ))}
+          </div>
+        ) : <p className="text-xs text-gray-600">-</p>}
+      </div>
+    );
+  }
+
+  function toggle(cvegeo) {
+    const next = seleccionados.has(cvegeo)
+      ? [...seleccionados].filter(c => c !== cvegeo)
+      : [...seleccionados, cvegeo];
+    onChange(next);
+  }
+
+  const opcionesFiltradas = busqueda.trim()
+    ? opciones.filter(o => o.label.toLowerCase().includes(busqueda.trim().toLowerCase()))
+    : opciones;
+
+  return (
+    <div>
+      <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">
+        Municipios (opcional{seleccionados.size > 0 ? ` · ${seleccionados.size} seleccionado${seleccionados.size !== 1 ? 's' : ''}` : ''})
+      </span>
+      {lista.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-1.5">
+          {lista.map(m => (
+            <span key={m.cve_mun} className="flex items-center gap-1 text-[10px] bg-[#fbf3f6] text-[#7B1C3E] px-1.5 py-0.5 rounded-full">
+              {m.nombre}{nombreEstado(m.cve_mun) ? ` (${nombreEstado(m.cve_mun)})` : ''}
+              <button type="button" onClick={() => toggle(m.cve_mun)} className="hover:text-red-600" title="Quitar">×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      {opciones.length > 0 && (
+        <input
+          type="text"
+          value={busqueda}
+          onChange={e => setBusqueda(e.target.value)}
+          placeholder="Buscar municipio…"
+          className="w-full text-[11px] border border-gray-200 rounded px-2 py-1 mb-1 bg-white focus:border-[#7B1C3E] outline-none"
+        />
+      )}
+      <div className="max-h-32 overflow-y-auto border border-gray-200 rounded bg-white divide-y divide-gray-50">
+        {opciones.length === 0 ? (
+          <p className="text-[11px] text-gray-400 px-2 py-1.5">Elige un estado arriba para buscar sus municipios</p>
+        ) : opcionesFiltradas.length === 0 ? (
+          <p className="text-[11px] text-gray-400 px-2 py-1.5">Sin resultados para "{busqueda}"</p>
+        ) : opcionesFiltradas.map(o => (
+          <label key={o.value} className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50 cursor-pointer">
+            <input type="checkbox" checked={seleccionados.has(o.value)} onChange={() => toggle(o.value)} className="accent-[#7B1C3E]" />
+            {o.label}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function CampoAvance({ valor, avanceEfectivo, esContenedor, estado, onChange, soloLectura }) {
+  const mostrado = valor != null ? valor : Math.round(avanceEfectivo);
+  if (esContenedor) {
+    return (
+      <div>
+        <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">Avance actual</span>
+        <div className="flex items-center gap-1.5">
+          <Lock size={10} className="text-gray-400" />
+          <span className="text-xs text-gray-500">{mostrado}%</span>
+        </div>
+        <p className="text-[9px] text-gray-400 mt-0.5 italic leading-snug">El avance y el estatus se calculan a partir de sus partes. Para avanzar, actualiza las tareas/acciones que contiene.</p>
+      </div>
+    );
+  }
+  // Hoja: avance bloqueado si no es En_proceso
+  const estadoActual = estado || 'Pendiente';
+  const bloqueado = soloLectura || estadoActual === 'Completada' || estadoActual === 'Pendiente' || estadoActual === 'Bloqueada' || estadoActual === 'Cancelada';
+  if (bloqueado) {
+    const nota = estadoActual === 'Completada' ? 'Completada: 100%'
+      : estadoActual === 'Pendiente' ? 'Pendiente: 0%'
+      : estadoActual === 'Bloqueada' ? 'Bloqueada: avance congelado'
+      : estadoActual === 'Cancelada' ? 'Cancelada' : '';
+    return (
+      <div>
+        <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">Avance actual</span>
+        <span className="text-xs text-gray-500">{mostrado}%</span>
+        {nota && <p className="text-[9px] text-gray-400 mt-0.5 italic">{nota}</p>}
+        <p className="text-[9px] text-gray-400 mt-0.5 italic leading-snug">{"Captura el avance parcial mientras está 'En proceso'. Marca 'Completada' para llegar al 100%."}</p>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">Avance actual</span>
+      <div className="flex items-center gap-2">
+        <input
+          type="range"
+          min="0"
+          max="99"
+          value={valor ?? 0}
+          onChange={e => onChange(parseInt(e.target.value))}
+          className="flex-1 h-1.5 accent-[#7B1C3E]"
+        />
+        <span className="text-xs font-bold tabular-nums w-8 text-right">{valor ?? 0}%</span>
+      </div>
+      <p className="text-[9px] text-gray-400 mt-0.5 italic leading-snug">Captura el avance parcial (0-99). Marca 'Completada' para llegar al 100%.</p>
+    </div>
+  );
+}
+
+// Gris no está en las opciones manuales (abajo, variante chip y variante
+// completa): gris significa "falta información para calcular" (Cancelada,
+// o Pendiente sin fecha — ver calcularSemaforo en el backend), no es un
+// color que alguien pueda declarar a mano. Un nodo puede seguir
+// MOSTRÁNDOSE gris automáticamente; solo se quitó de la lista de colores
+// que el override permite fijar.
+export function CampoSemaforo({ label = 'Semáforo', valor, override, efectivo, onChange, soloLectura, variante }) {
+  const colorMostrado = override && valor ? valor : efectivo;
+
+  if (variante === 'chip') {
+    const color = COLORES_SEMAFORO[colorMostrado];
+    return (
+      <div
+        className="inline-flex items-center gap-1.5 rounded-full pl-2 pr-2.5 py-1 border"
+        style={{ backgroundColor: CHIP_BG[colorMostrado], borderColor: `${color}40` }}
+      >
+        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+        <span className="text-[10px] text-gray-400 font-medium flex-shrink-0">{label}</span>
+        {soloLectura ? (
+          <span className="text-xs font-medium" style={{ color }}>{URGENCIA_SEMAFORO[colorMostrado]}</span>
+        ) : (
+          <select
+            value={override ? valor : ''}
+            onChange={e => onChange(e.target.value === '' ? null : e.target.value)}
+            className="text-xs font-medium bg-transparent border-none outline-none cursor-pointer"
+            style={{ color }}
+          >
+            <option value="">Automático</option>
+            <option value="verde">{URGENCIA_SEMAFORO.verde}</option>
+            <option value="ambar">{URGENCIA_SEMAFORO.ambar}</option>
+            <option value="rojo">{URGENCIA_SEMAFORO.rojo}</option>
+          </select>
+        )}
+        {override && (
+          <span className="text-[9px] font-semibold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full flex-shrink-0" title="Alguien forzó este color a mano: ya no sigue el cálculo automático">
+            Manual
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  if (soloLectura) {
+    return (
+      <div>
+        <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">{label}</span>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: COLORES_SEMAFORO[colorMostrado] }} />
+          <span className="text-xs">{URGENCIA_SEMAFORO[colorMostrado]}</span>
+          {override && (
+            <span className="text-[9px] font-semibold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded" title="Alguien forzó este color a mano: ya no sigue el cálculo automático">
+              Manual
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <span className="text-[10px] text-gray-400 uppercase tracking-wider block mb-0.5">{label}</span>
+      <div className="flex items-center gap-1.5">
+        <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: COLORES_SEMAFORO[colorMostrado] }} />
+        <select
+          value={override ? valor : ''}
+          onChange={e => onChange(e.target.value === '' ? null : e.target.value)}
+          className="text-xs border border-gray-200 rounded px-1 py-0.5 bg-white focus:border-[#7B1C3E] outline-none"
+        >
+          <option value="">Automático</option>
+          <option value="verde">🟢 {URGENCIA_SEMAFORO.verde}</option>
+          <option value="ambar">🟡 {URGENCIA_SEMAFORO.ambar}</option>
+          <option value="rojo">🔴 {URGENCIA_SEMAFORO.rojo}</option>
+        </select>
+        {override && <span className="text-[8px] bg-gray-200 text-gray-600 px-1 rounded font-bold">M</span>}
+      </div>
+    </div>
+  );
+}

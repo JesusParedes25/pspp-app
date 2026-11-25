@@ -1,0 +1,136 @@
+/**
+ * ARCHIVO: funcionProyecto.js
+ * PROPÓSITO: Responder, para un proyecto y el usuario actual, la única
+ *            pregunta que la gente se hace: "¿qué soy yo aquí y qué
+ *            puedo hacer?".
+ *
+ * NOTA TÉCNICA: por qué esto vive en un solo lugar
+ * ─────────────────────────────────────────────────────────────────
+ * Hasta ahora, saber si podías editar un proyecto exigía resolver
+ * mentalmente cuatro cosas: tu rol global, si tu DG coincide con la
+ * que lidera, si lo creaste y si eres responsable. El resultado no se
+ * mostraba en ningún lado — solo aparecía o desaparecía un botón, y
+ * el usuario tenía que deducir por qué.
+ *
+ * Aquí se calcula una vez y se traduce a una etiqueta legible. La
+ * regla es EXACTAMENTE la que aplica el backend (autorizacion.js):
+ * si las dos se separan, el usuario ve un botón que al pulsarlo
+ * falla, que es la peor experiencia posible.
+ * ─────────────────────────────────────────────────────────────────
+ */
+
+// Las FUNCIONES, del más al menos capaz. El orden importa: se devuelve la
+// primera que aplique.
+//
+// No confundir función con PERFIL. El perfil (usuarios.rol: superadmin,
+// ejecutivo, direccion, enlace, externo) es lo que la persona es en la
+// Secretaría y no cambia de un proyecto a otro. La función es lo que hace
+// en ESTE proyecto. El perfil dice dónde alcanza; la función, qué hace.
+//
+// El texto se dirige al usuario y le dice directamente qué puede hacer.
+// Directo no es informal: se evita tanto el lenguaje coloquial como la
+// redacción de oficio que nadie lee.
+export const FUNCION = {
+  RESPONSABLE: 'responsable',
+  COLABORADOR: 'colaborador',
+  ATRIBUCION: 'atribucion',    // edita por su cargo, sin participar en el proyecto
+  SEGUIMIENTO: 'seguimiento',  // consulta y designa participantes, sin editar
+  PARCIAL: 'parcial',          // solo captura en las partes que le asignaron
+  LECTOR: 'lector',
+};
+
+export const ETIQUETA_FUNCION = {
+  [FUNCION.RESPONSABLE]: 'Responsable',
+  [FUNCION.COLABORADOR]: 'Colaborador',
+  [FUNCION.ATRIBUCION]: 'Edición institucional',
+  [FUNCION.SEGUIMIENTO]: 'Solo seguimiento',
+  [FUNCION.PARCIAL]: 'Participas en una parte',
+  [FUNCION.LECTOR]: 'Solo lectura',
+};
+
+export const DESCRIPCION_FUNCION = {
+  [FUNCION.RESPONSABLE]: 'Editas el proyecto, designas participantes y puedes eliminarlo.',
+  [FUNCION.COLABORADOR]: 'Participas en este proyecto: capturas avances, comentas y subes evidencias.',
+  [FUNCION.ATRIBUCION]: 'Tu cargo te permite editar este proyecto, aunque no participes en él.',
+  [FUNCION.SEGUIMIENTO]: 'Consultas el proyecto y designas participantes. La información la edita el área responsable.',
+  [FUNCION.PARCIAL]: 'Capturas solo en las etapas o acciones a las que te invitaron. El resto del proyecto lo consultas.',
+  [FUNCION.LECTOR]: 'Consultas todo el proyecto, sin modificarlo.',
+};
+
+// Clases de color por función. Guinda para quien encabeza, azul para quien
+// participa, ámbar para la atribución que viene del cargo (que conviene
+// que se note distinta), gris para la consulta y el seguimiento.
+export const COLOR_FUNCION = {
+  [FUNCION.RESPONSABLE]: 'bg-guinda-50 text-guinda-700 border-guinda-200',
+  [FUNCION.COLABORADOR]: 'bg-blue-50 text-blue-700 border-blue-200',
+  [FUNCION.ATRIBUCION]: 'bg-amber-50 text-amber-700 border-amber-200',
+  [FUNCION.SEGUIMIENTO]: 'bg-slate-50 text-slate-600 border-slate-200',
+  [FUNCION.PARCIAL]: 'bg-blue-50 text-blue-700 border-blue-200',
+  [FUNCION.LECTOR]: 'bg-gray-50 text-gray-500 border-gray-200',
+};
+
+// Funciones que implican participación directa y personal en el
+// proyecto (responsable o colaborador asignado). Todo lo demás —
+// atribución por cargo, seguimiento, captura parcial, lectura— describe
+// alcance institucional o de consulta, no participación, y en un
+// listado de tarjetas es ruido: se repetiría casi idéntico en cada una.
+const FUNCIONES_DE_PARTICIPACION = [FUNCION.RESPONSABLE, FUNCION.COLABORADOR];
+
+/**
+ * @param {object} proyecto  necesita id_creador, id_dg_lider y, si se
+ *                           conoce, rol_usuario_actual (o mi_rol_proyecto
+ *                           en el listado)
+ * @param {object} usuario   el usuario autenticado
+ */
+export function calcularFuncion(proyecto, usuario, permisos) {
+  if (!proyecto || !usuario) return FUNCION.LECTOR;
+
+  const rolProyecto = proyecto.rol_usuario_actual || proyecto.mi_rol_proyecto || null;
+  const esCreador = usuario.id === proyecto.id_creador;
+  const esMismaDG = !!usuario.id_dg && usuario.id_dg === proyecto.id_dg_lider;
+
+  if (esCreador || rolProyecto === 'responsable' || rolProyecto === 'administracion_proyecto') return FUNCION.RESPONSABLE;
+
+  // El superadmin administra la plataforma; el ejecutivo ejerce
+  // atribuciones de edición sobre su propia DG. Ninguno de los dos
+  // participa en el proyecto, así que nombrarlos "Responsable" sería
+  // inexacto.
+  if (usuario.rol === 'superadmin') return FUNCION.ATRIBUCION;
+  if (usuario.rol === 'ejecutivo' && esMismaDG) return FUNCION.ATRIBUCION;
+
+  if (rolProyecto === 'colaborador' || rolProyecto === 'captura') return FUNCION.COLABORADOR;
+
+  // Invitado solo a una etapa o acción: no participa en el proyecto
+  // entero, pero tampoco es un lector. Solo el servidor lo sabe, así que
+  // se toma de los permisos cuando quien pinta el chip los tiene a mano.
+  if (permisos?.capturaParcial) return FUNCION.PARCIAL;
+
+  // Fuera de su Dirección General, el ejecutivo consulta y designa
+  // participantes, pero no edita: es un alcance distinto al de un lector.
+  if (usuario.rol === 'ejecutivo') return FUNCION.SEGUIMIENTO;
+
+  // 'direccion' y 'direccion_general' (paso 15 DGTIC) de la misma DG que
+  // lidera el proyecto: SEGUIMIENTO, no ATRIBUCION — su bono de DG tope
+  // en 'lectura' desde el paso 14 (direccion_dg/direccion_general_dg en
+  // funcion-efectiva.js), nunca edición automática. Antes de este paso
+  // esta rama decía ATRIBUCION para 'direccion', lo cual ya era incorrecto
+  // desde el paso 14: el chip prometía "tu cargo te permite editar este
+  // proyecto" y el botón de edición fallaba al pulsarlo — exactamente lo
+  // que este archivo dice en su cabecera que hay que evitar.
+  if ((usuario.rol === 'direccion' || usuario.rol === 'direccion_general') && esMismaDG) return FUNCION.SEGUIMIENTO;
+
+  return FUNCION.LECTOR;
+}
+
+// ¿Participa de verdad en el proyecto? Es lo que responde el filtro
+// "Donde participo": tener atribuciones por el cargo no es participar.
+export function participaEn(proyecto, usuario) {
+  const funcion = calcularFuncion(proyecto, usuario);
+  return funcion === FUNCION.RESPONSABLE || funcion === FUNCION.COLABORADOR;
+}
+
+// ¿Vale la pena mostrar la función en un listado de tarjetas? Solo cuando
+// distingue a este proyecto de los demás.
+export function funcionRelevanteEnListado(funcion) {
+  return FUNCIONES_DE_PARTICIPACION.includes(funcion);
+}

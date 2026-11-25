@@ -1,0 +1,710 @@
+/**
+ * ARCHIVO: NuevoProyecto.jsx
+ * PROPÓSITO: Formulario de 4 pasos para crear un nuevo proyecto.
+ *
+ * NOTA TÉCNICA: Formularios multi-paso con estado local
+ * ─────────────────────────────────────────────────────────────────
+ * Un formulario multi-paso divide un formulario largo en secciones
+ * manejables. El estado de TODOS los campos se mantiene en un solo
+ * objeto (datos). Los pasos son: (1) Info general, (2) Clasificación
+ * y meta, (3) Indicador y etiquetas, (4) DGs participantes. Al
+ * final, se envía TODO el objeto datos al backend con una sola
+ * petición POST. Si el usuario regresa a un paso anterior, los
+ * datos ya ingresados se mantienen.
+ * ─────────────────────────────────────────────────────────────────
+ */
+import { useState, useEffect, useRef } from 'react';
+import { useNavigate, useSearchParams, Navigate } from 'react-router-dom';
+import { useUI } from '../../context/UIContext';
+import { useAuth } from '../../context/AuthContext';
+import { usePermisosGlobales } from '../../hooks/usePermisos';
+import * as proyectosApi from '../../api/proyectos';
+import * as catalogosApi from '../../api/catalogos';
+import * as etapasApi from '../../api/etapas';
+import * as accionesApi from '../../api/acciones';
+import * as carterasApi from '../../api/carteras';
+import ModalCartera from '../../components/carteras/ModalCartera';
+import { ImagePlus, X, Plus, Trash2, ChevronDown, Briefcase, Copy } from 'lucide-react';
+import { mensajeDeError } from '../../api/transferencias';
+import ModalDuplicarProyecto from '../../components/proyectos/ModalDuplicarProyecto';
+import SelectorIndicadorCatalogo from '../../components/indicadores/SelectorIndicadorCatalogo';
+import EtiquetasChipInput from '../../components/common/EtiquetasChipInput';
+import { useEnvioUnico } from '../../hooks/useEnvioUnico';
+import { etiquetaUnidadIndicador } from '../../utils/formatoMoneda';
+import { TIPOS_INDICADOR, indicadorProyectoVacio, conDefaultsPorTipo } from '../../utils/tiposIndicador';
+import CamposIndicadorProyecto from '../../components/indicadores/CamposIndicadorProyecto';
+
+const PASOS = [
+  'Información general',
+  'Clasificación y meta',
+  'Indicadores y etiquetas',
+  'Estructura',
+  'Revisión y crear'
+];
+
+const INDICADOR_NUEVO = indicadorProyectoVacio;
+
+export default function NuevoProyecto() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const { mostrarToast } = useUI();
+  const { usuario } = useAuth();
+  const { puedeCrearProyecto } = usePermisosGlobales();
+  const [pasoActual, setPasoActual] = useState(0);
+  // Errores de validación por campo, mismo patrón que ModalRiesgo.jsx
+  // (borde rojo + texto rojo debajo del campo).
+  const [errores, setErrores] = useState({});
+
+  // Catálogos para selects
+  const [dgs, setDgs] = useState([]);
+  const [programas, setProgramas] = useState([]);
+  const [direccionesArea, setDireccionesArea] = useState([]);
+  const [carteras, setCarteras] = useState([]);
+  const [mostrarNuevaCartera, setMostrarNuevaCartera] = useState(false);
+  const [mostrarDuplicar, setMostrarDuplicar] = useState(false);
+  const [mostrarCatalogoInd, setMostrarCatalogoInd] = useState(false);
+
+  // Datos del formulario
+  const [datos, setDatos] = useState({
+    nombre: '',
+    descripcion: '',
+    tipo: 'Analisis_tecnico',
+    meta_descripcion: '',
+    indicadores: [],
+    es_prioritario: false,
+    fecha_inicio: '',
+    fecha_limite: '',
+    id_dg_lider: usuario?.id_dg || '',
+    id_direccion_area_lider: usuario?.id_direccion_area || '',
+    id_programa: '',
+    etiquetas: [],
+    // Cartera opcional a la que pertenecerá este proyecto (se agrega como
+    // su cartera principal después de crearlo — no es una columna de
+    // proyectos, se resuelve con cartera_proyecto). Si se llega aquí desde
+    // el tablero de una cartera (?cartera_id=), se precarga.
+    cartera_id: searchParams.get('cartera_id') || '',
+  });
+
+  // Estructura planificada (etapas + acciones locales, se crean tras POST proyecto)
+  const [etapasPlaneadas, setEtapasPlaneadas] = useState([]);
+  const [nuevaEtapaTexto, setNuevaEtapaTexto] = useState('');
+  const [nuevaAccionTexto, setNuevaAccionTexto] = useState({});
+  const [etapaExpandida, setEtapaExpandida] = useState(null);
+
+  const [imagenPortada, setImagenPortada] = useState(null);
+  const [previewPortada, setPreviewPortada] = useState(null);
+  const refImagen = useRef(null);
+
+  // Cargar catálogos al montar
+  useEffect(() => {
+    async function cargarCatalogos() {
+      try {
+        const [resDgs, resProg, resDA, resCarteras] = await Promise.all([
+          catalogosApi.obtenerDGs(),
+          catalogosApi.obtenerProgramas(),
+          catalogosApi.obtenerDireccionesArea(),
+          carterasApi.listarCarteras(),
+        ]);
+        setDgs(resDgs.datos);
+        setProgramas(resProg.datos);
+        setDireccionesArea(resDA.datos);
+        setCarteras(resCarteras.datos);
+      } catch (err) {
+        console.error('Error cargando catálogos:', err);
+      }
+    }
+    cargarCatalogos();
+  }, []);
+
+  // Enviar formulario — sin este candado, un doble clic en "Crear
+  // proyecto" duplicaba TODO: el proyecto, la cartera, la portada y cada
+  // etapa/acción planificada.
+  //
+  // Declarado antes del "return <Navigate>" de abajo a propósito: un Hook
+  // no puede quedar después de un return condicional — si puedeCrearProyecto
+  // cambia entre renders (p. ej. al terminar de cargar el usuario), este
+  // componente llamaría un número distinto de Hooks según el render,
+  // lo que corrompe el estado de todos los Hooks declarados aquí.
+  const [crearProyecto, enviando] = useEnvioUnico(async () => {
+    // Última defensa: el botón ya viene deshabilitado sin nombre, pero si
+    // se llegó aquí de cualquier otra forma, no se manda la petición.
+    if (!datos.nombre.trim()) {
+      setErrores(prev => ({ ...prev, nombre: 'El nombre del proyecto es obligatorio' }));
+      setPasoActual(0);
+      return;
+    }
+    try {
+      const respuesta = await proyectosApi.crearProyecto(datos);
+      const nuevoId = respuesta.datos.id;
+      if (datos.cartera_id) {
+        try {
+          await carterasApi.agregarProyectosACartera(datos.cartera_id, [nuevoId], true);
+        } catch (carteraErr) {
+          console.error('Error agregando el proyecto a la cartera:', carteraErr);
+          mostrarToast('Proyecto creado, pero no se pudo agregar a la cartera seleccionada', 'error');
+        }
+      }
+      // Antes un fallo de la portada solo quedaba en la consola. Se avisa
+      // al final, junto con el resultado del resto (hay un solo toast).
+      let avisoPortada = '';
+      if (imagenPortada) {
+        try {
+          await proyectosApi.subirImagenProyecto(nuevoId, imagenPortada);
+        } catch (imgErr) {
+          console.error('Error subiendo imagen de portada:', imgErr);
+          avisoPortada = ` No se pudo subir la imagen de portada: ${mensajeDeError(imgErr, 'agrégala desde Editar proyecto.')}`;
+        }
+      }
+      // Crear etapas y acciones planificadas. El proyecto ya existe en este
+      // punto, así que un fallo aquí no debe tratarse como fatal — pero
+      // tampoco debe pasar inadvertido: antes se descartaba el error en
+      // silencio y el usuario nunca se enteraba de que parte de la
+      // estructura que capturó no se guardó.
+      let fallosEstructura = 0;
+      for (const ep of etapasPlaneadas) {
+        try {
+          const resEtapa = await etapasApi.crearEtapa(nuevoId, { nombre: ep.nombre });
+          const etapaId = resEtapa.datos?.id;
+          if (etapaId && ep.acciones?.length) {
+            for (const acc of ep.acciones) {
+              try {
+                await accionesApi.crearAccionEnEtapa(etapaId, { nombre: acc });
+              } catch (accErr) {
+                console.error('Error creando acción planificada:', accErr);
+                fallosEstructura++;
+              }
+            }
+          }
+        } catch (etapaErr) {
+          console.error('Error creando etapa planificada:', etapaErr);
+          fallosEstructura += 1 + (ep.acciones?.length || 0);
+        }
+      }
+      if (fallosEstructura > 0) {
+        // Toast solo soporta 'exito'|'error'|'info' (Toast.jsx) — esto es un
+        // éxito parcial, pero 'error' es más honesto que 'info' aquí: algo
+        // que el usuario capturó no se guardó y necesita revisarlo.
+        mostrarToast(`Proyecto creado, pero ${fallosEstructura} elemento(s) de la estructura no se guardaron: revísala desde el proyecto.${avisoPortada}`, 'error');
+      } else {
+        mostrarToast(avisoPortada ? `Proyecto creado.${avisoPortada}` : 'Proyecto creado exitosamente', avisoPortada ? 'error' : 'exito');
+      }
+      navigate(`/proyectos/${nuevoId}`);
+    } catch (err) {
+      mostrarToast(mensajeDeError(err, 'Error al crear proyecto.'), 'error');
+    }
+  });
+
+  function carteraCreada(nuevaCartera) {
+    setCarteras(prev => [...prev, nuevaCartera]);
+    actualizar('cartera_id', nuevaCartera.id);
+    setMostrarNuevaCartera(false);
+  }
+
+  // Operativo no puede crear proyectos
+  if (!puedeCrearProyecto) return <Navigate to="/proyectos" replace />;
+
+  // Actualizar un campo del formulario
+  function actualizar(campo, valor) {
+    setDatos(prev => ({ ...prev, [campo]: valor }));
+  }
+
+  // Navegar entre pasos. El paso 0 (Información general) no se puede
+  // saltar sin nombre — antes cualquier paso avanzaba sin validar nada,
+  // así que se podía llegar a "Revisión y crear" con el nombre en blanco.
+  function siguiente() {
+    if (pasoActual === 0 && !datos.nombre.trim()) {
+      setErrores(prev => ({ ...prev, nombre: 'El nombre del proyecto es obligatorio' }));
+      return;
+    }
+    if (pasoActual < PASOS.length - 1) setPasoActual(prev => prev + 1);
+  }
+  function anterior() {
+    if (pasoActual > 0) setPasoActual(prev => prev - 1);
+  }
+
+  function seleccionarImagen(e) {
+    const archivo = e.target.files[0];
+    if (!archivo) return;
+    setImagenPortada(archivo);
+    setPreviewPortada(URL.createObjectURL(archivo));
+  }
+
+  function quitarImagen() {
+    setImagenPortada(null);
+    setPreviewPortada(null);
+    if (refImagen.current) refImagen.current.value = '';
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-6">
+      {/* Título */}
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Nuevo proyecto</h1>
+        <p className="text-sm text-gray-500 mt-1">Completa la información en {PASOS.length} pasos</p>
+      </div>
+
+      {/* Atajo para el caso "ya tengo uno igual": se ofrece ANTES de empezar
+          a llenar los 5 pasos, que es cuando sirve. Después de invertir
+          tiempo en el formulario, enterarse de que existía un duplicado ya
+          no ayuda. Solo se muestra en el primer paso para no distraer a
+          quien ya decidió capturar desde cero. */}
+      {pasoActual === 0 && (
+        <div className="flex items-start justify-between gap-3 px-4 py-3 border border-gray-200 rounded-xl bg-gray-50">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-gray-800">¿Ya existe un proyecto con esta misma estructura?</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Duplícalo y ahórrate capturar las etapas y acciones de nuevo. Puedes elegir si traer
+              fechas, indicadores, territorio y más.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setMostrarDuplicar(true)}
+            className="btn-secondary text-sm flex items-center gap-1.5 flex-shrink-0"
+          >
+            <Copy size={14} /> Duplicar uno existente
+          </button>
+        </div>
+      )}
+
+      {mostrarDuplicar && (
+        <ModalDuplicarProyecto
+          onCerrar={() => setMostrarDuplicar(false)}
+          mostrarToast={mostrarToast}
+          onDuplicado={(proyecto) => navigate(`/proyectos/${proyecto.id}?tab=seguimiento`)}
+        />
+      )}
+
+      {/* Indicador de pasos */}
+      <div className="flex items-center gap-2">
+        {PASOS.map((paso, indice) => (
+          <div key={indice} className="flex items-center gap-2 flex-1">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
+              indice < pasoActual ? 'bg-green-500 text-white'
+                : indice === pasoActual ? 'bg-guinda-500 text-white'
+                : 'bg-gray-200 text-gray-500'
+            }`}>
+              {indice < pasoActual ? '✓' : indice + 1}
+            </div>
+            <span className={`text-xs hidden sm:block ${indice === pasoActual ? 'text-guinda-600 font-medium' : 'text-gray-400'}`}>
+              {paso}
+            </span>
+            {indice < PASOS.length - 1 && <div className="flex-1 h-px bg-gray-200" />}
+          </div>
+        ))}
+      </div>
+
+      {/* Contenido del paso actual */}
+      <div className="card p-6">
+        {pasoActual === 0 && (
+          <div className="space-y-4">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Información general</h2>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Nombre del proyecto *</label>
+              <input type="text" value={datos.nombre}
+                onChange={e => {
+                  actualizar('nombre', e.target.value);
+                  if (errores.nombre && e.target.value.trim()) setErrores(prev => ({ ...prev, nombre: undefined }));
+                }}
+                placeholder="Ej: Programa Nacional de Regularización de Lotes"
+                className={`input-base ${errores.nombre ? 'border-red-400 focus:ring-red-300' : ''}`} required />
+              {errores.nombre && <p className="text-xs text-red-500 mt-0.5">{errores.nombre}</p>}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Descripción</label>
+              <textarea value={datos.descripcion} onChange={e => actualizar('descripcion', e.target.value)}
+                rows={3} className="input-base resize-none" placeholder="Describe brevemente el proyecto..." />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Imagen de encabezado <span className="text-gray-400 font-normal">(opcional, máx. 5 MB)</span></label>
+              {previewPortada ? (
+                <div className="relative h-32 rounded-lg overflow-hidden border border-gray-200">
+                  <img src={previewPortada} alt="Preview" className="w-full h-full object-cover" />
+                  <button type="button" onClick={quitarImagen}
+                    className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1 transition-colors">
+                    <X size={14} />
+                  </button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => refImagen.current?.click()}
+                  className="flex items-center gap-2 w-full h-24 border-2 border-dashed border-gray-300 hover:border-guinda-400 rounded-lg justify-center text-sm text-gray-400 hover:text-guinda-500 transition-colors">
+                  <ImagePlus size={20} />
+                  Seleccionar imagen
+                </button>
+              )}
+              <input ref={refImagen} type="file" accept="image/*" onChange={seleccionarImagen} className="hidden" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Fecha de inicio</label>
+                <input type="date" value={datos.fecha_inicio} onChange={e => actualizar('fecha_inicio', e.target.value)} className="input-base" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Fecha límite</label>
+                <input type="date" value={datos.fecha_limite} onChange={e => actualizar('fecha_limite', e.target.value)} className="input-base" />
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">DG Líder</label>
+              <select value={datos.id_dg_lider}
+                onChange={e => setDatos(prev => ({ ...prev, id_dg_lider: e.target.value, id_direccion_area_lider: '' }))}
+                className="input-base">
+                <option value="">Seleccionar DG...</option>
+                {dgs.map(dg => <option key={dg.id} value={dg.id}>{dg.siglas} ({dg.nombre})</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Dirección de área líder</label>
+              <select value={datos.id_direccion_area_lider} onChange={e => actualizar('id_direccion_area_lider', e.target.value)} className="input-base">
+                <option value="">Seleccionar dirección de área...</option>
+                {direccionesArea.filter(da => !datos.id_dg_lider || da.dg_siglas === dgs.find(d => d.id === datos.id_dg_lider)?.siglas).map(da => (
+                  <option key={da.id} value={da.id}>{da.siglas} ({da.nombre})</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+
+        {pasoActual === 1 && (
+          <div className="space-y-4">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Clasificación y meta</h2>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Tipo de proyecto</label>
+              <select value={datos.tipo} onChange={e => actualizar('tipo', e.target.value)} className="input-base">
+                <option value="Analisis_tecnico">Análisis técnico</option>
+                <option value="Obra_fisica">Obra física</option>
+                <option value="Programa_masivo">Programa masivo</option>
+                <option value="Regularizacion">Regularización</option>
+                <option value="Proceso_recurrente">Proceso recurrente</option>
+                <option value="Instrumento_planeacion">Instrumento de planeación</option>
+                <option value="Conflicto_agrario">Conflicto agrario</option>
+                <option value="Otro">Otro</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Descripción de la meta</label>
+              <textarea value={datos.meta_descripcion} onChange={e => actualizar('meta_descripcion', e.target.value)}
+                rows={2} className="input-base resize-none" placeholder="Ej: Regularizar 92 ZMs a nivel nacional..." />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Programa presupuestario</label>
+              <select value={datos.id_programa} onChange={e => actualizar('id_programa', e.target.value)} className="input-base">
+                <option value="">Sin programa específico</option>
+                {(() => {
+                  // Separar programas relacionados con la DG del usuario vs el resto
+                  const dgUsuario = dgs.find(d => d.id === (datos.id_dg_lider || usuario?.id_dg));
+                  const siglasUsuario = dgUsuario?.siglas || '';
+                  const relacionados = programas.filter(p => p.unidad_responsable && siglasUsuario && p.unidad_responsable.includes(siglasUsuario));
+                  const otros = programas.filter(p => !relacionados.includes(p));
+
+                  return (
+                    <>
+                      {relacionados.length > 0 && (
+                        <optgroup label={`Programas de ${siglasUsuario}`}>
+                          {relacionados.map(p => (
+                            <option key={p.id} value={p.id}>{p.clave} ({p.nombre})</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      <optgroup label={relacionados.length > 0 ? 'Otros programas' : 'Programas presupuestarios'}>
+                        {otros.map(p => (
+                          <option key={p.id} value={p.id}>{p.clave} ({p.nombre})</option>
+                        ))}
+                      </optgroup>
+                    </>
+                  );
+                })()}
+              </select>
+              {datos.id_programa && (() => {
+                const prog = programas.find(p => String(p.id) === String(datos.id_programa));
+                if (!prog) return null;
+                return (
+                  <div className="mt-1.5 px-3 py-2 bg-gray-50 rounded-lg text-xs text-gray-500 space-y-0.5">
+                    {prog.unidad_responsable && <p><span className="font-medium text-gray-600">UR:</span> {prog.unidad_responsable}</p>}
+                    {prog.descripcion && <p>{prog.descripcion}</p>}
+                  </div>
+                );
+              })()}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Cartera <span className="text-gray-400 font-normal">(opcional)</span></label>
+              <div className="flex items-center gap-2">
+                <select value={datos.cartera_id} onChange={e => actualizar('cartera_id', e.target.value)} className="input-base flex-1">
+                  <option value="">Sin cartera</option>
+                  {carteras.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                </select>
+                <button type="button" onClick={() => setMostrarNuevaCartera(true)}
+                  className="flex items-center gap-1 text-xs text-guinda-600 hover:text-guinda-700 font-medium px-2 py-2 whitespace-nowrap">
+                  <Briefcase size={13} /> Nueva
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mt-1">Agrupa este proyecto con otros relacionados. Puedes agregarlo a más carteras después.</p>
+            </div>
+            <div className="flex flex-col gap-3">
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={datos.es_prioritario} onChange={e => actualizar('es_prioritario', e.target.checked)} className="rounded border-gray-300 text-guinda-500 focus:ring-guinda-500" />
+                <span className="text-sm text-gray-700">Es proyecto prioritario</span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {pasoActual === 2 && (
+          <div className="space-y-5">
+            <h2 className="text-lg font-semibold text-gray-900">Indicadores y etiquetas</h2>
+
+            {/* ─── Indicadores ─── */}
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-sm font-medium text-gray-700">Indicadores cuantitativos</p>
+                <button type="button" onClick={() => setMostrarCatalogoInd(true)}
+                  className="text-xs text-guinda-600 hover:text-guinda-700 font-medium flex items-center gap-1">
+                  <span className="text-base leading-none">+</span> Agregar indicador
+                </button>
+              </div>
+
+              {datos.indicadores.length === 0 && (
+                <p className="text-xs text-gray-400 italic">
+                  Sin indicadores. Se eligen del catálogo compartido, para que dos proyectos que
+                  miden lo mismo queden comparables entre sí.
+                </p>
+              )}
+
+              {/* Los indicadores se eligen del catálogo en vez de teclearse:
+                  así el mismo indicador no acaba capturado de tres formas
+                  distintas y puede consolidarse entre proyectos. Si falta
+                  alguno se da de alta desde el mismo modal. */}
+              {mostrarCatalogoInd && (
+                <SelectorIndicadorCatalogo
+                  yaUsados={datos.indicadores.map(i => i.id_catalogo)}
+                  onCerrar={() => setMostrarCatalogoInd(false)}
+                  onElegir={(delCatalogo) => {
+                    actualizar('indicadores', [...datos.indicadores, conDefaultsPorTipo({
+                      ...INDICADOR_NUEVO(),
+                      id_catalogo: delCatalogo.id,
+                      nombre: delCatalogo.nombre,
+                      tipo: delCatalogo.tipo,
+                      unidad: delCatalogo.unidad,
+                      unidad_personalizada: delCatalogo.unidad_personalizada || '',
+                      descripcion: delCatalogo.descripcion || '',
+                    })]);
+                    setMostrarCatalogoInd(false);
+                  }}
+                />
+              )}
+
+              <div className="space-y-3">
+                {datos.indicadores.map((ind, idx) => (
+                  <FormIndicador key={idx} indicador={ind} indice={idx}
+                    onCambio={(patch) => {
+                      const copia = [...datos.indicadores];
+                      copia[idx] = { ...copia[idx], ...patch };
+                      actualizar('indicadores', copia);
+                    }}
+                    onEliminar={() => actualizar('indicadores', datos.indicadores.filter((_, i) => i !== idx))}
+                    onToggle={() => {
+                      const copia = [...datos.indicadores];
+                      copia[idx] = { ...copia[idx], _abierto: !copia[idx]._abierto };
+                      actualizar('indicadores', copia);
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* ─── Etiquetas (chip input con sugerencias) ─── */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Etiquetas</label>
+              <EtiquetasChipInput value={datos.etiquetas} onChange={v => actualizar('etiquetas', v)} />
+            </div>
+          </div>
+        )}
+
+        {pasoActual === 3 && (
+          <div className="space-y-4">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Estructura del proyecto</h2>
+            <p className="text-sm text-gray-500">Define las etapas y acciones iniciales. Podrás modificarlas después.</p>
+
+            {/* Etapas planificadas */}
+            {etapasPlaneadas.map((ep, idx) => (
+              <div key={idx} className="border border-gray-200 rounded-lg overflow-hidden">
+                <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 cursor-pointer"
+                  onClick={() => setEtapaExpandida(etapaExpandida === idx ? null : idx)}>
+                  <span className="w-5 h-5 bg-guinda-500 text-white rounded text-[10px] font-bold flex items-center justify-center flex-shrink-0">{idx + 1}</span>
+                  <span className="flex-1 text-sm font-medium text-gray-800 truncate">{ep.nombre}</span>
+                  <span className="text-[10px] text-gray-400">{ep.acciones.length} acc.</span>
+                  <button type="button" onClick={e => { e.stopPropagation(); setEtapasPlaneadas(prev => prev.filter((_, i) => i !== idx)); }}
+                    className="text-gray-300 hover:text-red-500 p-0.5"><Trash2 size={13} /></button>
+                  <ChevronDown size={14} className={`text-gray-400 transition-transform ${etapaExpandida === idx ? 'rotate-180' : ''}`} />
+                </div>
+                {etapaExpandida === idx && (
+                  <div className="px-3 py-2 space-y-1 border-t border-gray-100">
+                    {ep.acciones.map((acc, ai) => (
+                      <div key={ai} className="flex items-center gap-2 py-1 pl-2 border-l-2 border-guinda-200">
+                        <span className="w-1.5 h-1.5 rounded-full bg-gray-300 flex-shrink-0" />
+                        <span className="flex-1 text-xs text-gray-700 truncate">{acc}</span>
+                        <button type="button" onClick={() => {
+                          const copia = [...etapasPlaneadas];
+                          copia[idx] = { ...copia[idx], acciones: copia[idx].acciones.filter((_, j) => j !== ai) };
+                          setEtapasPlaneadas(copia);
+                        }} className="text-gray-300 hover:text-red-500 p-0.5"><Trash2 size={11} /></button>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-1.5 pt-1">
+                      <input type="text" value={nuevaAccionTexto[idx] || ''}
+                        onChange={e => setNuevaAccionTexto(prev => ({ ...prev, [idx]: e.target.value }))}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && (nuevaAccionTexto[idx] || '').trim()) {
+                            e.preventDefault();
+                            const copia = [...etapasPlaneadas];
+                            copia[idx] = { ...copia[idx], acciones: [...copia[idx].acciones, nuevaAccionTexto[idx].trim()] };
+                            setEtapasPlaneadas(copia);
+                            setNuevaAccionTexto(prev => ({ ...prev, [idx]: '' }));
+                          }
+                        }}
+                        className="flex-1 text-xs border border-gray-200 rounded px-2 py-1 focus:border-guinda-400 outline-none"
+                        placeholder="+ Nueva acción…" />
+                      <button type="button" onClick={() => {
+                        if (!(nuevaAccionTexto[idx] || '').trim()) return;
+                        const copia = [...etapasPlaneadas];
+                        copia[idx] = { ...copia[idx], acciones: [...copia[idx].acciones, nuevaAccionTexto[idx].trim()] };
+                        setEtapasPlaneadas(copia);
+                        setNuevaAccionTexto(prev => ({ ...prev, [idx]: '' }));
+                      }} className="text-xs text-guinda-600 hover:text-guinda-700 font-medium px-1.5 py-1">
+                        <Plus size={13} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {/* Quick-add etapa */}
+            <div className="flex items-center gap-2">
+              <input type="text" value={nuevaEtapaTexto}
+                onChange={e => setNuevaEtapaTexto(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && nuevaEtapaTexto.trim()) {
+                    e.preventDefault();
+                    setEtapasPlaneadas(prev => [...prev, { nombre: nuevaEtapaTexto.trim(), acciones: [] }]);
+                    setNuevaEtapaTexto('');
+                    setEtapaExpandida(etapasPlaneadas.length);
+                  }
+                }}
+                className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 focus:border-guinda-400 outline-none"
+                placeholder="+ Nueva etapa…" />
+              <button type="button" onClick={() => {
+                if (!nuevaEtapaTexto.trim()) return;
+                setEtapasPlaneadas(prev => [...prev, { nombre: nuevaEtapaTexto.trim(), acciones: [] }]);
+                setNuevaEtapaTexto('');
+                setEtapaExpandida(etapasPlaneadas.length);
+              }} className="btn-secondary text-xs flex items-center gap-1">
+                <Plus size={13} /> Agregar
+              </button>
+            </div>
+
+            {etapasPlaneadas.length === 0 && (
+              <p className="text-xs text-gray-400 italic text-center py-3">Sin etapas. Puedes agregarlas ahora o después desde el proyecto.</p>
+            )}
+          </div>
+        )}
+
+        {pasoActual === 4 && (
+          <div className="space-y-4">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Revisión</h2>
+            <p className="text-sm text-gray-500 mb-4">Verifica que la información sea correcta antes de crear el proyecto.</p>
+            <div className="space-y-3 text-sm">
+              <ResumenCampo titulo="Nombre" valor={datos.nombre} />
+              <ResumenCampo titulo="Tipo" valor={datos.tipo?.replace(/_/g, ' ')} />
+              <ResumenCampo titulo="DG Líder" valor={dgs.find(d => String(d.id) === String(datos.id_dg_lider))?.siglas || 'No seleccionada'} />
+              <ResumenCampo titulo="Dirección de área" valor={direccionesArea.find(d => String(d.id) === String(datos.id_direccion_area_lider))?.siglas || 'No especificada'} />
+              <ResumenCampo titulo="Fechas" valor={`${datos.fecha_inicio || '-'} a ${datos.fecha_limite || '-'}`} />
+              <ResumenCampo titulo="Programa" valor={(() => { const p = programas.find(pr => String(pr.id) === String(datos.id_programa)); return p ? `${p.clave} (${p.nombre})` : 'Sin programa específico'; })()} />
+              <ResumenCampo titulo="Cartera" valor={carteras.find(c => String(c.id) === String(datos.cartera_id))?.nombre || 'Sin cartera'} />
+              <ResumenCampo titulo="Meta" valor={datos.meta_descripcion || 'Sin descripción'} />
+              <ResumenCampo titulo="Indicadores" valor={datos.indicadores.length > 0 ? `${datos.indicadores.length} indicador(es)` : 'Ninguno'} />
+              <ResumenCampo titulo="Etapas" valor={etapasPlaneadas.length > 0 ? `${etapasPlaneadas.length} etapa(s), ${etapasPlaneadas.reduce((s, e) => s + e.acciones.length, 0)} acción(es)` : 'Sin estructura inicial'} />
+              {datos.indicadores.map((ind, i) => (
+                <div key={i} className="pl-6 text-xs text-gray-500">
+                  <span className="font-medium text-gray-700">{ind.nombre || '(sin nombre)'}:</span>{' '}
+                  meta {ind.meta_global} {etiquetaUnidadIndicador(ind)}
+                  {ind.temporalidad === 'Anual' && ` (${ind.anio_inicio}–${ind.anio_fin})`}
+                </div>
+              ))}
+              <ResumenCampo titulo="Prioritario" valor={datos.es_prioritario ? 'Sí' : 'No'} />
+              {datos.etiquetas.length > 0 && <ResumenCampo titulo="Etiquetas" valor={datos.etiquetas.join(', ')} />}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Botones de navegación */}
+      <div className="flex justify-between">
+        <button onClick={anterior} disabled={pasoActual === 0} className="btn-secondary disabled:opacity-50">
+          Anterior
+        </button>
+        {pasoActual < PASOS.length - 1 ? (
+          <button onClick={siguiente} className="btn-primary">Siguiente</button>
+        ) : (
+          <button onClick={crearProyecto} disabled={enviando || !datos.nombre.trim()} className="btn-verde">
+            {enviando ? 'Creando...' : 'Crear proyecto'}
+          </button>
+        )}
+      </div>
+
+      {mostrarNuevaCartera && (
+        <ModalCartera onCerrar={() => setMostrarNuevaCartera(false)} onGuardada={carteraCreada} />
+      )}
+    </div>
+  );
+}
+
+// Sub-componente para mostrar un campo en la revisión
+function ResumenCampo({ titulo, valor }) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="text-gray-500 font-medium w-28 flex-shrink-0">{titulo}:</span>
+      <span className="text-gray-900">{valor}</span>
+    </div>
+  );
+}
+
+// Sub-componente: formulario inline de un indicador (colapsable) — el
+// header (número, nombre, badge de tipo, eliminar, colapsar) es propio
+// de este paso del wizard; los campos del indicador en sí viven en
+// CamposIndicadorProyecto, compartido con Editar proyecto y con el
+// wizard de vincular indicador.
+function FormIndicador({ indicador, indice, onCambio, onEliminar, onToggle }) {
+  const etiquetaTipo = TIPOS_INDICADOR.find(t => t.valor === indicador.tipo)?.etiqueta || indicador.tipo;
+  const etiquetaUnidad = etiquetaUnidadIndicador(indicador) || '#';
+
+  return (
+    <div className="border border-gray-200 rounded-lg overflow-hidden">
+      {/* Header colapsable */}
+      <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 cursor-pointer" onClick={onToggle}>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-xs font-bold text-guinda-500 flex-shrink-0">#{indice + 1}</span>
+          <span className="text-sm font-medium text-gray-800 truncate">
+            {indicador.nombre || 'Nuevo indicador'}
+          </span>
+          {indicador.meta_global && (
+            <span className="text-xs text-gray-400 flex-shrink-0">Meta: {indicador.meta_global} {etiquetaUnidad}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">{etiquetaTipo}</span>
+          <button type="button" onClick={e => { e.stopPropagation(); onEliminar(); }}
+            className="text-gray-400 hover:text-red-500 text-sm">✕</button>
+          <span className="text-gray-400 text-xs">{indicador._abierto ? '▲' : '▼'}</span>
+        </div>
+      </div>
+
+      {/* Cuerpo expandido */}
+      {indicador._abierto && (
+        <div className="p-4 border-t border-gray-100">
+          <CamposIndicadorProyecto indicador={indicador} onCambio={onCambio} />
+        </div>
+      )}
+    </div>
+  );
+}

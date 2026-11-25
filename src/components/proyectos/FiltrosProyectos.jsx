@@ -1,0 +1,83 @@
+/**
+ * ARCHIVO: FiltrosProyectos.jsx
+ * PROPÓSITO: Barra de filtros para el listado de proyectos.
+ *
+ * NOTA TÉCNICA: Filtros como chips seleccionables
+ * ─────────────────────────────────────────────────────────────────
+ * Los filtros se presentan como chips clickeables que alternan
+ * entre activo e inactivo. Al seleccionar un filtro, se llama a
+ * onCambio con los nuevos filtros y el hook useProyectos recarga
+ * automáticamente. El chip activo tiene fondo guinda; el inactivo
+ * tiene fondo gris. El filtro de alcance (Donde participo / Donde soy
+ * responsable / Todos) vive un nivel arriba, en ListadoProyectos.jsx.
+ * ─────────────────────────────────────────────────────────────────
+ */
+import { Search } from 'lucide-react';
+import EtiquetaMultiSelect from '../common/EtiquetaMultiSelect';
+
+const tipos = [
+  { valor: 'Analisis_tecnico', etiqueta: 'Análisis técnico' },
+  { valor: 'Obra_fisica', etiqueta: 'Obra física' },
+  { valor: 'Programa_masivo', etiqueta: 'Programa masivo' },
+  { valor: 'Regularizacion', etiqueta: 'Regularización' },
+  { valor: 'Proceso_recurrente', etiqueta: 'Proceso recurrente' },
+  { valor: 'Instrumento_planeacion', etiqueta: 'Instrumento de planeación' },
+  { valor: 'Conflicto_agrario', etiqueta: 'Conflicto agrario' },
+  { valor: 'Otro', etiqueta: 'Otro' },
+];
+
+export default function FiltrosProyectos({ filtros, onCambio, carteras }) {
+  return (
+    <div className="space-y-3">
+      {/* Búsqueda */}
+      <div className="relative">
+        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+        <input
+          type="text"
+          placeholder="Buscar por nombre o descripción..."
+          value={filtros.busqueda || ''}
+          onChange={e => onCambio({ busqueda: e.target.value || undefined, pagina: 1 })}
+          className="input-base pl-9"
+        />
+      </div>
+
+      {/* Select de tipo */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-gray-500">Tipo:</span>
+        <select
+          value={filtros.tipo || ''}
+          onChange={e => onCambio({ tipo: e.target.value || undefined, pagina: 1 })}
+          className="input-base w-auto text-xs"
+        >
+          <option value="">Todos los tipos</option>
+          {tipos.map(tipo => (
+            <option key={tipo.valor} value={tipo.valor}>{tipo.etiqueta}</option>
+          ))}
+        </select>
+
+        {carteras && (
+          <>
+            <span className="text-xs text-gray-500 ml-2">Cartera:</span>
+            <select
+              value={filtros.cartera || ''}
+              onChange={e => onCambio({ cartera: e.target.value || undefined, pagina: 1 })}
+              className="input-base w-auto text-xs"
+            >
+              <option value="">Todas las carteras</option>
+              {carteras.map(c => (
+                <option key={c.id} value={c.id}>{c.nombre}</option>
+              ))}
+            </select>
+          </>
+        )}
+
+        <span className="text-xs text-gray-500 ml-2">Etiqueta:</span>
+        <EtiquetaMultiSelect
+          valores={filtros.etiqueta ? filtros.etiqueta.split(',') : []}
+          onCambio={valores => onCambio({ etiqueta: valores.length > 0 ? valores.join(',') : undefined, pagina: 1 })}
+          className="w-48"
+        />
+      </div>
+    </div>
+  );
+}

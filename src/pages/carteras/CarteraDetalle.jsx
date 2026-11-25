@@ -1,0 +1,737 @@
+/**
+ * ARCHIVO: CarteraDetalle.jsx
+ * PROPÓSITO: Tablero de una cartera de proyectos — pestañas Resumen
+ *            (tipo Tablero: métricas, proyectos de la cartera con alta/
+ *            baja y marcar principal, indicadores, estatus cualitativo,
+ *            riesgos y vencimientos; ver carteras.queries.js), Cronograma
+ *            (línea de tiempo consolidada por proyecto), Mapa (territorio
+ *            filtrado a los proyectos de la cartera) y Actividad (timeline
+ *            cruzado de todos sus proyectos). No hay pestaña "Proyectos"
+ *            aparte — su gestión vive dentro de Resumen.
+ */
+import { useState, useEffect } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
+import {
+  ArrowLeft, Briefcase, Pencil, Trash2, AlertTriangle, Clock,
+  LayoutDashboard, FolderKanban, Plus, Star, X, Loader2, Building2,
+  Calendar, Map, Activity, Shield, Target, Layers,
+} from 'lucide-react';
+import { useCartera } from '../../hooks/useCarteras';
+import { useUI } from '../../context/UIContext';
+import * as carterasApi from '../../api/carteras';
+import EmptyState from '../../components/common/EmptyState';
+import ModalCartera from '../../components/carteras/ModalCartera';
+import ModalAgregarProyectos from '../../components/carteras/ModalAgregarProyectos';
+import CronogramaCartera from '../../components/carteras/CronogramaCartera';
+import MapaCartera from '../../components/carteras/MapaCartera';
+import ActividadCartera from '../../components/carteras/ActividadCartera';
+import { ETIQUETA_TIPO_INDICADOR, agruparPorCatalogo, TarjetaIndicadorOAgrupada } from '../../components/indicadores/TarjetaIndicador';
+import ListaEstatusCualitativo, { TituloEstatusCualitativo } from '../../components/indicadores/ListaEstatusCualitativo';
+import { calcularColorSemaforo } from '../../utils/semaforoColor';
+import { formatearEstado } from '../../utils/estados';
+import { COLORES_SEMAFORO } from '../../components/common/SemaforoDot';
+
+const PESTANAS = [
+  { id: 'resumen', etiqueta: 'Resumen', icono: LayoutDashboard },
+  { id: 'cronograma', etiqueta: 'Cronograma', icono: Calendar },
+  { id: 'mapa', etiqueta: 'Mapa', icono: Map },
+  { id: 'actividad', etiqueta: 'Actividad', icono: Activity },
+];
+
+// Misma tarjeta de métrica que usa el Tablero (Inicio.jsx) — icono en
+// círculo de color + número grande + etiqueta. Se replica aquí en vez de
+// importarla porque Inicio.jsx no la exporta como componente aparte.
+function MetricaCard({ icono: Icono, titulo, valor, color }) {
+  return (
+    <div className="card p-4 flex items-center gap-4">
+      <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${color}`}>
+        <Icono size={22} />
+      </div>
+      <div>
+        <p className="text-2xl font-bold text-gray-900">{valor}</p>
+        <p className="text-xs text-gray-500">{titulo}</p>
+      </div>
+    </div>
+  );
+}
+
+// Misma tarjeta de indicadores que el Tablero (IndicadoresResumen en
+// Inicio.jsx) — agrupa por tipo, muestra barra de meta si tiene meta_global
+// o el valor crudo si es numeralía sin meta. Se replica aquí porque
+// Inicio.jsx no la exporta como componente aparte.
+function IndicadoresResumen({ indicadores }) {
+  // Misma tarjeta que el Tablero y el Panorama del proyecto — ver
+  // TarjetaIndicador. Antes esto era una copia del componente de
+  // Inicio.jsx y ya había divergido de él.
+  const grupos = {};
+  for (const ind of indicadores) {
+    const tipo = ind.tipo || 'Otro';
+    (grupos[tipo] = grupos[tipo] || []).push(ind);
+  }
+
+  return (
+    <div className="space-y-4">
+      {Object.entries(grupos).map(([tipo, inds]) => (
+        <div key={tipo}>
+          <p className="text-xs font-medium text-gray-700 mb-2">{ETIQUETA_TIPO_INDICADOR[tipo] || tipo}</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {agruparPorCatalogo(inds).map(grupo => (
+              <TarjetaIndicadorOAgrupada key={grupo[0].id_catalogo || grupo[0].id} grupo={grupo} variante="compacto" />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function CarteraDetalle() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const { mostrarToast } = useUI();
+  const { cartera, proyectos, resumen, cargando, error, recargar } = useCartera(id);
+  const [pestanaActiva, setPestanaActiva] = useState('resumen');
+  const [mostrarEditar, setMostrarEditar] = useState(false);
+  const [mostrarAgregar, setMostrarAgregar] = useState(false);
+  const [mostrarEliminar, setMostrarEliminar] = useState(false);
+  // "Proyectos de esta cartera" se puede leer de dos formas: la tabla de
+  // siempre (un proyecto por fila) o pivoteada por etapa — pedido
+  // explícito de una usuaria que administra ~13 proyectos con la misma
+  // metodología y quería ver "la etapa de Solicitudes de todos mis
+  // proyectos, para ver a quién le falta" sin entrar uno por uno.
+  const [vistaProyectos, setVistaProyectos] = useState('proyecto');
+
+  if (cargando) {
+    return (
+      <div className="flex items-center justify-center py-24 text-gray-400 gap-2">
+        <Loader2 size={18} className="animate-spin" /> Cargando cartera...
+      </div>
+    );
+  }
+
+  if (error || !cartera) {
+    return (
+      <EmptyState
+        icono={Briefcase}
+        titulo="Cartera no encontrada"
+        subtitulo={error || 'La cartera que buscas no existe o fue eliminada.'}
+        accion="Volver a proyectos"
+        onAccion={() => navigate('/proyectos')}
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* Header */}
+      <div>
+        <Link to="/proyectos?vista=agrupado" className="flex items-center gap-1 text-xs text-gray-400 hover:text-guinda-600 mb-2 transition-colors w-fit">
+          <ArrowLeft size={13} /> Volver a carteras
+        </Link>
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Briefcase size={20} className="text-guinda-500 flex-shrink-0" />
+              <h1 className="text-2xl font-bold text-gray-900">{cartera.nombre}</h1>
+            </div>
+            {cartera.descripcion && <p className="text-sm text-gray-500 mt-1">{cartera.descripcion}</p>}
+            <div className="flex items-center gap-3 mt-2 flex-wrap text-xs text-gray-500">
+              {cartera.dg_lider_siglas && (
+                <span className="inline-flex items-center gap-1">
+                  <Building2 size={12} /> {cartera.dg_lider_siglas}
+                </span>
+              )}
+              {cartera.responsable_nombre && <span>Responsable: {cartera.responsable_nombre}</span>}
+              {(cartera.fecha_inicio || cartera.fecha_fin) && (
+                <span>{cartera.fecha_inicio?.slice(0, 10) || '-'} a {cartera.fecha_fin?.slice(0, 10) || '-'}</span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button onClick={() => setMostrarEditar(true)} className="btn-secondary text-xs flex items-center gap-1.5">
+              <Pencil size={13} /> Editar
+            </button>
+            <button onClick={() => setMostrarEliminar(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50">
+              <Trash2 size={13} /> Eliminar
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Pestañas */}
+      <div className="border-b border-gray-200">
+        <div className="flex gap-6">
+          {PESTANAS.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setPestanaActiva(tab.id)}
+              aria-pressed={pestanaActiva === tab.id}
+              className={`flex items-center gap-2 px-1 py-3 text-sm font-medium border-b-2 transition-colors ${
+                pestanaActiva === tab.id
+                  ? 'border-guinda-500 text-guinda-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <tab.icono size={16} />
+              {tab.etiqueta}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Resumen — mismo lenguaje visual que el Tablero (Inicio.jsx),
+          pero acotado a los proyectos de esta cartera en vez de a los
+          proyectos del usuario. */}
+      {pestanaActiva === 'resumen' && resumen && (
+        <div className="space-y-6">
+          {/* Métricas — igual a las 4 tarjetas del Tablero */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <MetricaCard icono={FolderKanban} titulo="Proyectos" valor={resumen.total_proyectos} color="bg-guinda-50 text-guinda-600" />
+            <MetricaCard icono={AlertTriangle} titulo="Acciones vencidas" valor={resumen.vencidos.length} color="bg-red-50 text-red-600" />
+            <MetricaCard icono={Clock} titulo="Vencen en 30 días" valor={resumen.por_vencer.length} color="bg-yellow-50 text-yellow-600" />
+            <MetricaCard icono={Shield} titulo="Riesgos abiertos" valor={resumen.riesgos.length} color="bg-orange-50 text-orange-600" />
+          </div>
+
+          {/* Proyectos de esta cartera — alta/baja y gestión, antes vivía en
+              su propia pestaña "Proyectos"; se unificó aquí. El estado de
+              cada proyecto ya se distingue con el punto de color + etiqueta
+              en la columna Estatus de la tabla, sin necesitar un bloque de
+              distribución aparte. */}
+          <section>
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+              <h2 className="text-sm font-semibold flex items-center gap-1.5 text-guinda-700">
+                <FolderKanban size={14} /> Proyectos de esta cartera
+              </h2>
+              <div className="flex items-center gap-2">
+                <Link to={`/proyectos/nuevo?cartera_id=${id}`} className="btn-secondary text-xs flex items-center gap-1.5">
+                  <Plus size={14} /> Nuevo proyecto
+                </Link>
+                <button onClick={() => setMostrarAgregar(true)} className="btn-primary text-xs flex items-center gap-1.5">
+                  <Plus size={14} /> Agregar existentes
+                </button>
+              </div>
+            </div>
+
+            {proyectos.length === 0 ? (
+              <EmptyState
+                icono={FolderKanban}
+                titulo="Sin proyectos"
+                subtitulo="Esta cartera todavía no tiene proyectos asociados."
+                accion="Agregar proyectos"
+                onAccion={() => setMostrarAgregar(true)}
+              />
+            ) : (
+              <>
+                <div className="flex items-center gap-1 mb-3 bg-gray-100 rounded-lg p-0.5 w-fit">
+                  {[
+                    { id: 'proyecto', etiqueta: 'Por proyecto', icono: FolderKanban },
+                    { id: 'etapa', etiqueta: 'Por etapa', icono: Layers },
+                  ].map(v => (
+                    <button
+                      key={v.id}
+                      onClick={() => setVistaProyectos(v.id)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                        vistaProyectos === v.id ? 'bg-white text-guinda-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      <v.icono size={13} /> {v.etiqueta}
+                    </button>
+                  ))}
+                </div>
+
+                {vistaProyectos === 'proyecto' ? (
+                  <div className="card p-5 overflow-x-auto">
+                    <table className="w-full border-collapse">
+                      <thead>
+                        <tr className="text-left text-[10px] uppercase tracking-wide text-gray-400 font-semibold border-b border-gray-200">
+                          <th className="pb-2.5 pr-3">Proyecto</th>
+                          <th className="pb-2.5 pr-3">Dependencia</th>
+                          <th className="pb-2.5 pr-3">Estado</th>
+                          <th className="pb-2.5 pr-3 w-40">Avance</th>
+                          <th className="pb-2.5 pr-3">Responsable</th>
+                          <th className="pb-2.5 pr-3">Fecha límite</th>
+                          <th className="pb-2.5"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {proyectos.map(p => (
+                          <FilaProyectoCartera key={p.id} proyecto={p} carteraId={id} onCambio={recargar} />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <VistaPorEtapa etapas={resumen.etapas} proyectos={proyectos} />
+                )}
+              </>
+            )}
+          </section>
+
+          {/* Indicadores — misma tarjeta que el Tablero (IndicadoresResumen
+              en Inicio.jsx), agrupados por tipo, agregando los de todos los
+              proyectos de la cartera. Siempre visible (con mensaje si está
+              vacía) — antes desaparecía por completo sin datos, y eso se
+              leía como "no funciona" en vez de "sin datos todavía". */}
+          <div className="card p-5">
+            <h2 className="text-sm font-semibold mb-3 flex items-center gap-1.5 text-guinda-700">
+              <Target size={14} className="text-blue-500" /> Indicadores
+            </h2>
+            {resumen.indicadores.length === 0 ? (
+              <p className="text-xs text-gray-400 italic">
+                Ningún proyecto de esta cartera tiene indicadores capturados. Se agregan desde la pestaña "Panorama del proyecto" de cada proyecto.
+              </p>
+            ) : (
+              <IndicadoresResumen indicadores={resumen.indicadores} />
+            )}
+          </div>
+
+          {/* Estatus cualitativo — la nota corta por etapa/acción/tarea
+              (migración 047) que dice "¿cómo va esto ahora mismo?". Misma
+              sección y mismo componente que el Tablero y el Panorama del
+              proyecto. */}
+          <div className="card p-5">
+            <TituloEstatusCualitativo />
+            <ListaEstatusCualitativo
+              items={resumen.estatus_cualitativo}
+              vacio="Ningún proyecto de esta cartera tiene un estatus cualitativo capturado todavía."
+            />
+          </div>
+
+          {/* Acciones vencidas + Por vencer — mismo bloque de dos columnas
+              y mismo estilo compacto de punto de color que el Tablero */}
+          {(resumen.vencidos.length > 0 || resumen.por_vencer.length > 0) && (
+            <div className={`grid grid-cols-1 gap-6 ${resumen.vencidos.length > 0 && resumen.por_vencer.length > 0 ? 'lg:grid-cols-2' : ''}`}>
+              {resumen.vencidos.length > 0 && (
+                <div className="card p-5">
+                  <h2 className="text-sm font-semibold mb-3 flex items-center gap-1.5 text-guinda-700">
+                    <AlertTriangle size={14} className="text-red-500" /> Acciones vencidas
+                  </h2>
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {resumen.vencidos.map(a => (
+                      <Link
+                        key={a.id}
+                        to={`/proyectos/${a.id_proyecto}?tab=seguimiento&nodo=${a.id}`}
+                        className="flex items-start gap-2 p-2 rounded hover:bg-red-50 border border-transparent hover:border-red-100 transition"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 flex-shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs text-gray-800 truncate font-medium">{a.nombre}</p>
+                          <p className="text-[10px] text-gray-500">{a.proyecto_nombre}{a.etapa_nombre ? ` › ${a.etapa_nombre}` : ''} · -{a.dias_atraso}d</p>
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {resumen.por_vencer.length > 0 && (
+                <div className="card p-5">
+                  <h2 className="text-sm font-semibold mb-3 flex items-center gap-1.5 text-guinda-700">
+                    <Clock size={14} className="text-yellow-600" /> Vencen en 30 días
+                  </h2>
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {resumen.por_vencer.map(a => (
+                      <Link
+                        key={a.id}
+                        to={`/proyectos/${a.id_proyecto}?tab=seguimiento&nodo=${a.id}`}
+                        className="flex items-start gap-2 p-2 rounded hover:bg-yellow-50 border border-transparent hover:border-yellow-100 transition"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mt-1.5 flex-shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs text-gray-800 truncate font-medium">{a.nombre}</p>
+                          <p className="text-[10px] text-gray-500">{a.proyecto_nombre}{a.etapa_nombre ? ` › ${a.etapa_nombre}` : ''} · {a.dias_restantes}d restantes</p>
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Riesgos abiertos — misma grilla de 3 columnas del Tablero */}
+          {resumen.riesgos.length > 0 && (
+            <div className="card p-5">
+              <h2 className="text-sm font-semibold mb-3 flex items-center gap-1.5 text-guinda-700">
+                <Shield size={14} className="text-orange-500" /> Riesgos abiertos
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {resumen.riesgos.map(r => (
+                  <Link
+                    key={r.id}
+                    to={`/proyectos/${r.id_proyecto}?tab=seguimiento&nodo=${r.entidad_id}`}
+                    className="flex items-center gap-2 p-2 rounded hover:bg-orange-50 border border-gray-100 hover:border-orange-200 transition"
+                  >
+                    <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                      r.nivel === 'Critico' ? 'bg-red-600' :
+                      r.nivel === 'Alto' ? 'bg-orange-500' :
+                      r.nivel === 'Medio' ? 'bg-yellow-500' : 'bg-gray-400'
+                    }`} />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-gray-800 truncate">{r.titulo}</p>
+                      <p className="text-[10px] text-gray-500">{r.proyecto_nombre} · {r.nivel}</p>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {resumen.vencidos.length === 0 && resumen.por_vencer.length === 0 && resumen.riesgos.length === 0 && (
+            <p className="text-sm text-gray-400 italic text-center py-6">Sin acciones vencidas, por vencer ni riesgos abiertos en esta cartera.</p>
+          )}
+        </div>
+      )}
+
+      {/* Cronograma */}
+      {pestanaActiva === 'cronograma' && (
+        <CronogramaCartera proyectos={proyectos} />
+      )}
+
+      {/* Mapa */}
+      {pestanaActiva === 'mapa' && (
+        <MapaCartera carteraId={id} />
+      )}
+
+      {/* Actividad */}
+      {pestanaActiva === 'actividad' && (
+        <ActividadCartera carteraId={id} />
+      )}
+
+      {mostrarEditar && (
+        <ModalCartera
+          cartera={cartera}
+          onCerrar={() => setMostrarEditar(false)}
+          onGuardada={() => { setMostrarEditar(false); recargar(); }}
+        />
+      )}
+
+      {mostrarAgregar && (
+        <ModalAgregarProyectos
+          carteraId={id}
+          idsExcluidos={proyectos.map(p => p.id)}
+          onCerrar={() => setMostrarAgregar(false)}
+          onAgregados={() => { setMostrarAgregar(false); recargar(); }}
+        />
+      )}
+
+      {mostrarEliminar && (
+        <ModalEliminarCartera
+          cartera={cartera}
+          onCerrar={() => setMostrarEliminar(false)}
+          onEliminada={() => { mostrarToast('Cartera eliminada', 'exito'); navigate('/proyectos?vista=agrupado'); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function FilaProyectoCartera({ proyecto, carteraId, onCambio }) {
+  const { mostrarToast } = useUI();
+  const [procesando, setProcesando] = useState(false);
+
+  async function quitar() {
+    if (!window.confirm(`¿Quitar "${proyecto.nombre}" de esta cartera? El proyecto no se elimina, solo se desvincula.`)) return;
+    setProcesando(true);
+    try {
+      await carterasApi.quitarProyectoDeCartera(carteraId, proyecto.id);
+      mostrarToast('Proyecto quitado de la cartera', 'exito');
+      onCambio();
+    } catch (err) {
+      mostrarToast(err.response?.data?.mensaje || 'Error al quitar el proyecto', 'error');
+    } finally {
+      setProcesando(false);
+    }
+  }
+
+  async function marcarPrincipal() {
+    setProcesando(true);
+    try {
+      await carterasApi.agregarProyectosACartera(carteraId, [proyecto.id], true);
+      mostrarToast('Cartera marcada como principal para este proyecto', 'exito');
+      onCambio();
+    } catch (err) {
+      mostrarToast(err.response?.data?.mensaje || 'Error al actualizar', 'error');
+    } finally {
+      setProcesando(false);
+    }
+  }
+
+  const completo = proyecto.estado === 'Concluido';
+  const cancelado = proyecto.estado === 'Cancelado';
+  const fechaMostrada = proyecto.fecha_fin_efectiva || proyecto.fecha_limite;
+  const punto = puntoEstado({
+    estado: proyecto.estado,
+    vencido: proyecto.fecha_limite_vencida,
+    tieneAccionVencida: proyecto.tiene_accion_vencida,
+    completo, cancelado,
+  });
+  // Mismo cálculo que ya usa Panorama del proyecto para su anillo de
+  // avance (% vs. tiempo transcurrido entre fecha inicio y fecha límite)
+  // — antes esta barra tenía su propio criterio aparte (solo verde/rojo
+  // según venció o no), así que un proyecto podía verse "sano" aquí y
+  // "en riesgo" en Panorama, o viceversa.
+  const { color: colorBarra } = calcularColorSemaforo(proyecto.porcentaje_calculado, proyecto.fecha_inicio_efectiva, proyecto.fecha_fin_efectiva);
+  const avance = Math.round(parseFloat(proyecto.porcentaje_calculado) || 0);
+
+  return (
+    <tr className="border-b border-gray-50 last:border-0 hover:bg-guinda-50/40 transition-colors">
+      <td className="py-2.5 pr-3">
+        <Link to={`/proyectos/${proyecto.id}`} className="text-sm font-medium text-gray-800 hover:text-guinda-600">
+          {proyecto.nombre}
+        </Link>
+        <div className="flex items-center gap-1.5 mt-0.5">
+          {proyecto.es_principal && (
+            <span className="flex items-center gap-0.5 text-[10px] text-guinda-600 font-semibold" title="Cartera principal de este proyecto">
+              <Star size={10} className="fill-guinda-500 text-guinda-500" /> Principal
+            </span>
+          )}
+          {parseInt(proyecto.riesgos_abiertos) > 0 && (
+            <span className="flex items-center text-[10px] text-orange-500">
+              <AlertTriangle size={10} className="mr-0.5" /> {proyecto.riesgos_abiertos} riesgo(s)
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="py-2.5 pr-3">
+        {proyecto.dg_siglas && (
+          <span className="text-[10px] font-semibold bg-blue-50 text-blue-700 rounded px-1.5 py-0.5">{proyecto.dg_siglas}</span>
+        )}
+      </td>
+      <td className="py-2.5 pr-3">
+        <span
+          className="flex items-center gap-1.5 text-xs text-gray-700 whitespace-nowrap"
+          title={proyecto.tiene_accion_vencida && !proyecto.fecha_limite_vencida
+            ? 'Alguna acción dentro del proyecto ya venció, aunque su fecha límite general todavía no.' : undefined}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${punto.color}`} />
+          {punto.texto}
+        </span>
+      </td>
+      <td className="py-2.5 pr-3">
+        <div className="flex items-center gap-2">
+          <span className="w-16 h-1.5 rounded-full bg-gray-100 overflow-hidden inline-block flex-shrink-0">
+            <span className="block h-full rounded-full" style={{ width: `${avance}%`, backgroundColor: colorBarra }} />
+          </span>
+          <span className="text-xs font-semibold text-gray-700 tabular-nums">{avance}%</span>
+        </div>
+      </td>
+      <td className="py-2.5 pr-3 text-xs text-gray-600 whitespace-nowrap">{proyecto.creador_nombre || '-'}</td>
+      <td className="py-2.5 pr-3 text-xs text-gray-600 whitespace-nowrap">{fechaMostrada?.slice(0, 10) || '-'}</td>
+      <td className="py-2.5 text-right whitespace-nowrap">
+        {!proyecto.es_principal && (
+          <button onClick={marcarPrincipal} disabled={procesando} className="text-[11px] text-gray-400 hover:text-guinda-600 disabled:opacity-40 mr-2">
+            Marcar principal
+          </button>
+        )}
+        <button onClick={quitar} disabled={procesando} className="p-1 text-gray-300 hover:text-red-500 disabled:opacity-40 align-middle" title="Quitar de esta cartera">
+          <X size={14} />
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+// ─── Vista "Por etapa" ────────────────────────────────────────
+// Pivotea las etapas de todos los proyectos de la cartera: en vez de
+// Proyecto → sus etapas, se elige UNA etapa (por nombre) y se ve qué tan
+// avanzado va cada proyecto en ella — útil cuando varios proyectos de la
+// cartera comparten la misma metodología (mismos nombres de etapa).
+function VistaPorEtapa({ etapas, proyectos }) {
+  const [seleccion, setSeleccion] = useState('');
+
+  const grupos = {};
+  for (const e of etapas) {
+    const clave = e.nombre.trim().toLowerCase();
+    if (!grupos[clave]) grupos[clave] = { clave, nombre: e.nombre.trim(), items: [] };
+    grupos[clave].items.push(e);
+  }
+  const listaGrupos = Object.values(grupos).sort((a, b) => b.items.length - a.items.length || a.nombre.localeCompare(b.nombre));
+
+  useEffect(() => {
+    if (listaGrupos.length > 0 && !grupos[seleccion]) setSeleccion(listaGrupos[0].clave);
+  }, [etapas, seleccion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (listaGrupos.length === 0) {
+    return <p className="text-xs text-gray-400 italic py-6 text-center">Ningún proyecto de esta cartera tiene etapas capturadas todavía.</p>;
+  }
+
+  const grupo = grupos[seleccion] || listaGrupos[0];
+  const ordenados = [...grupo.items].sort((a, b) => (parseFloat(a.porcentaje_calculado) || 0) - (parseFloat(b.porcentaje_calculado) || 0));
+  const promedio = Math.round(grupo.items.reduce((s, e) => s + (parseFloat(e.porcentaje_calculado) || 0), 0) / grupo.items.length);
+  const idsConEtapa = new Set(grupo.items.map(e => e.id_proyecto));
+  const sinEtapa = proyectos.filter(p => !idsConEtapa.has(p.id));
+
+  return (
+    <div>
+      <div className="flex items-center gap-2.5 flex-wrap mb-3">
+        <label className="text-xs text-gray-500 flex-shrink-0">Etapa:</label>
+        <select
+          value={grupo.clave}
+          onChange={e => setSeleccion(e.target.value)}
+          className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white focus:border-guinda-400 outline-none"
+        >
+          {listaGrupos.map(g => (
+            <option key={g.clave} value={g.clave}>{g.nombre} ({g.items.length} proyecto{g.items.length !== 1 ? 's' : ''})</option>
+          ))}
+        </select>
+        <span className="text-[11px] text-gray-400">
+          {grupo.items.length} de {proyectos.length} proyecto{proyectos.length !== 1 ? 's' : ''} de la cartera · avance promedio {promedio}%
+        </span>
+      </div>
+
+      <div className="card p-5 overflow-x-auto">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wide text-gray-400 font-semibold border-b border-gray-200">
+              <th className="pb-2.5 pr-3">Proyecto</th>
+              <th className="pb-2.5 pr-3">Estado</th>
+              <th className="pb-2.5 pr-3 w-40">Avance</th>
+              <th className="pb-2.5 pr-3">Responsable</th>
+              <th className="pb-2.5 pr-3">Fecha límite</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ordenados.map(e => <FilaEtapaCartera key={e.id} etapa={e} />)}
+          </tbody>
+        </table>
+      </div>
+
+      {sinEtapa.length > 0 && (
+        <p className="text-[11px] text-gray-400 mt-2">
+          {sinEtapa.length} proyecto{sinEtapa.length !== 1 ? 's' : ''} de esta cartera no {sinEtapa.length !== 1 ? 'tienen' : 'tiene'} una etapa llamada "{grupo.nombre}": {sinEtapa.map(p => p.nombre).join(', ')}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function FilaEtapaCartera({ etapa }) {
+  const completo = etapa.estado === 'Completada';
+  const cancelado = etapa.estado === 'Cancelada';
+  const bloqueada = etapa.estado === 'Bloqueada';
+  const punto = puntoEstado({ estado: etapa.estado, vencido: etapa.vencida, completo, cancelado, bloqueada });
+  const fechaCruda = etapa.fecha_limite || etapa.fecha_fin;
+  // semaforo_efectivo ya viene calculado del backend con la misma fórmula
+  // que usa el árbol de Seguimiento (avance-semaforo.js) — no un criterio
+  // aparte, para que esta etapa se vea del mismo color aquí y allá.
+  const colorBarra = COLORES_SEMAFORO[etapa.semaforo_efectivo] || COLORES_SEMAFORO.gris;
+  const avance = Math.round(parseFloat(etapa.porcentaje_calculado) || 0);
+  const fecha = fechaCruda?.slice(0, 10);
+
+  return (
+    <tr className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50">
+      <td className="py-2.5 pr-3">
+        <Link to={`/proyectos/${etapa.id_proyecto}?tab=seguimiento&nodo=${etapa.id}`} className="text-xs font-medium text-gray-800 hover:text-guinda-600">
+          {etapa.proyecto_nombre}
+        </Link>
+        {etapa.dg_siglas && <span className="text-[10px] text-gray-400 ml-1.5">{etapa.dg_siglas}</span>}
+      </td>
+      <td className="py-2.5 pr-3">
+        <span className="inline-flex items-center gap-1.5 text-xs text-gray-600 whitespace-nowrap">
+          <span className={`w-1.5 h-1.5 rounded-full ${punto.color}`} />
+          {punto.texto}
+        </span>
+      </td>
+      <td className="py-2.5 pr-3">
+        <div className="flex items-center gap-2">
+          <span className="w-16 h-1.5 rounded-full bg-gray-100 overflow-hidden inline-block flex-shrink-0">
+            <span className="block h-full rounded-full" style={{ width: `${avance}%`, backgroundColor: colorBarra }} />
+          </span>
+          <span className="text-xs font-semibold text-gray-700 tabular-nums">{avance}%</span>
+        </div>
+      </td>
+      <td className="py-2.5 pr-3 text-xs text-gray-600 whitespace-nowrap">{etapa.responsable_nombre || '-'}</td>
+      <td className="py-2.5 pr-3 text-xs text-gray-600 whitespace-nowrap">{fecha || '-'}</td>
+    </tr>
+  );
+}
+
+// Punto de color + etiqueta de estatus, para filas de Proyecto o de Etapa
+// — recibe banderas ya normalizadas (completo/cancelado/bloqueada) en vez
+// de comparar el string crudo contra un solo valor fijo, porque "vencido"
+// y "tieneAccionVencida" son indicadores propios de Carteras (no viven en
+// la columna `estado`) que deben poder ganarle a cualquier estado real.
+// El texto de cada estado real sale de formatearEstado() (utils/estados.js
+// — el mismo glosario que usa el resto de la plataforma), no de una
+// palabra propia de esta pantalla.
+//
+// "vencido" y "tieneAccionVencida" son señales distintas a propósito:
+// antes una sola bandera "vencido" mezclaba "la fecha límite general ya
+// pasó" con "alguna acción interna está vencida", y la tabla podía
+// mostrar "Vencido" junto a una fecha límite todavía en el futuro (la
+// causa real era la segunda, no la primera). Con las dos separadas, la
+// etiqueta nunca contradice la fecha que se ve en la misma fila.
+function puntoEstado({ estado, vencido, tieneAccionVencida, completo, cancelado, bloqueada }) {
+  if (vencido) return { color: 'bg-red-500', texto: 'Vencido' };
+  if (tieneAccionVencida) return { color: 'bg-red-500', texto: 'Con acciones vencidas' };
+  if (completo) return { color: 'bg-green-500', texto: formatearEstado('Completada') };
+  if (bloqueada) return { color: 'bg-red-500', texto: formatearEstado('Bloqueada') };
+  if (cancelado) return { color: 'bg-gray-400', texto: formatearEstado('Cancelada') };
+  if (estado === 'En_proceso') return { color: 'bg-blue-500', texto: formatearEstado('En_proceso') };
+  return { color: 'bg-gray-300', texto: formatearEstado('Pendiente') };
+}
+
+function ModalEliminarCartera({ cartera, onCerrar, onEliminada }) {
+  const { mostrarToast } = useUI();
+  const [afectados, setAfectados] = useState(null);
+  const [eliminando, setEliminando] = useState(false);
+
+  useEffect(() => {
+    carterasApi.confirmarEliminarCartera(cartera.id)
+      .then(res => setAfectados(res.datos.proyectos_afectados))
+      .catch(() => setAfectados(0));
+  }, [cartera.id]);
+
+  async function eliminar() {
+    setEliminando(true);
+    try {
+      await carterasApi.eliminarCartera(cartera.id);
+      onEliminada();
+    } catch (err) {
+      mostrarToast(err.response?.data?.mensaje || 'Error al eliminar la cartera', 'error');
+      setEliminando(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={17} className="text-red-500" />
+            <h2 className="text-sm font-bold text-gray-900">Eliminar cartera</h2>
+          </div>
+          <button onClick={onCerrar} className="p-1 text-gray-400 hover:text-gray-700 rounded hover:bg-gray-100">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <p className="text-sm text-gray-700">
+            Estás a punto de eliminar la cartera <strong>"{cartera.nombre}"</strong>. Los proyectos que contiene <strong>no se eliminan</strong>, solo se desvinculan de ella.
+          </p>
+          {afectados === null ? (
+            <p className="text-xs text-gray-400">Verificando proyectos afectados...</p>
+          ) : afectados > 0 ? (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+              <p className="text-xs text-amber-800">
+                ⚠ <strong>{afectados}</strong> proyecto(s) tienen esta cartera como su cartera <strong>principal</strong>: al eliminarla, quedarán sin cartera principal (podrás asignarles otra después).
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500">Ningún proyecto tiene esta cartera como principal.</p>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-gray-100 bg-gray-50 rounded-b-xl">
+          <button onClick={onCerrar} className="px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 rounded-lg">
+            Cancelar
+          </button>
+          <button onClick={eliminar} disabled={eliminando || afectados === null}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed">
+            {eliminando && <Loader2 size={12} className="animate-spin" />}
+            Sí, eliminar cartera
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

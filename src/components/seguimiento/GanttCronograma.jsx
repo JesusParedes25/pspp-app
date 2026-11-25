@@ -1,0 +1,450 @@
+/**
+ * ARCHIVO: GanttCronograma.jsx
+ * PROPÓSITO: Diagrama de Gantt jerárquico que muestra etapas → acciones
+ *            → subacciones/tareas como barras horizontales sobre una
+ *            línea de tiempo con meses.
+ *
+ * NOTA TÉCNICA: Gantt jerárquico con carga bajo demanda
+ * ─────────────────────────────────────────────────────────────────
+ * Un Gantt es una tabla donde el eje Y son las tareas y el eje X
+ * es el tiempo. Las etapas se expanden para mostrar acciones, y las
+ * acciones se expanden un nivel más para mostrar sus subacciones y
+ * sus tareas —mezcladas, ordenadas por fecha límite: son hermanas,
+ * ambas cuelgan directo de la acción—. Todo se carga bajo demanda
+ * (lazy loading) al expandir la etapa o la acción correspondiente.
+ * Cada barra muestra el porcentaje de avance como relleno interno, y
+ * un tooltip con detalles al hover. La línea roja vertical marca el
+ * día de hoy.
+ * ─────────────────────────────────────────────────────────────────
+ */
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { formatearEstado } from '../../utils/estados';
+import { ChevronDown, ChevronRight, Layers, CheckSquare, Info } from 'lucide-react';
+import * as accionesApi from '../../api/acciones';
+import * as tareasApi from '../../api/tareas';
+import { obtenerActividadesSinFecha } from '../../api/proyectos';
+import { parseFechaLocal, formatFecha } from '../../utils/fecha';
+
+const ETIQUETA_TIPO_SIN_FECHA = { etapa: 'Etapa', accion: 'Acción', tarea: 'Tarea' };
+import { COLORES_SEMAFORO, CHIP_BG, LEYENDA_SEMAFORO, TEXTO_AMBAR_SOBRE_CHIP } from '../common/SemaforoDot';
+
+const ANCHO_NOMBRES = 'w-72';
+
+// Las etapas llegan ya en su 'orden' (curado a mano, correcto tal cual). Sus
+// hijos (acciones/subacciones) no traen ese cuidado — llegan en el orden en
+// que se capturaron, que no dice nada del calendario. En un Gantt lo que
+// importa es CUÁNDO vence cada quien, así que aquí sí se reordenan por
+// fecha límite ascendente (mismo campo que ya posiciona la barra:
+// fecha_fin_efectiva, que resuelve fecha_limite → fecha_fin → heredada de
+// hijos). Sin fecha capturada se va al final, no se inventa un orden.
+function ordenarPorFechaLimite(lista) {
+  const conFecha = [];
+  const sinFecha = [];
+  for (const item of lista) {
+    const fecha = item.fecha_fin_efectiva || item.fecha_fin;
+    (parseFechaLocal(fecha) ? conFecha : sinFecha).push(item);
+  }
+  conFecha.sort((a, b) => {
+    const fa = parseFechaLocal(a.fecha_fin_efectiva || a.fecha_fin);
+    const fb = parseFechaLocal(b.fecha_fin_efectiva || b.fecha_fin);
+    return fa - fb;
+  });
+  return [...conFecha, ...sinFecha];
+}
+
+export default function GanttCronograma({ proyectoId, etapas = [], fechaInicioProyecto, fechaFinProyecto }) {
+  const [expandidas, setExpandidas] = useState({}); // { etapaId: true }
+  const [accionesExpandidas, setAccionesExpandidas] = useState({}); // { accionId: true }
+  const [accionesPorEtapa, setAccionesPorEtapa] = useState({}); // { etapaId: [] }
+  const [subaccionesPorAccion, setSubaccionesPorAccion] = useState({}); // { accionId: [] }
+  const [tooltip, setTooltip] = useState(null);
+
+  // Bloque 3.2: lo que el Cronograma no puede dibujar por falta de fecha:
+  // un hueco explicado, no omitido en silencio. Independiente de la carga
+  // bajo demanda de arriba: cuenta TODO el proyecto, no solo lo expandido.
+  const [sinFecha, setSinFecha] = useState({ total: 0, items: [] });
+  const [mostrarListaSinFecha, setMostrarListaSinFecha] = useState(false);
+  useEffect(() => {
+    if (!proyectoId) return;
+    obtenerActividadesSinFecha(proyectoId)
+      .then(datos => setSinFecha(datos || { total: 0, items: [] }))
+      .catch(() => setSinFecha({ total: 0, items: [] }));
+  }, [proyectoId]);
+
+  // ─── Rango de tiempo ─────────────────────────────────────────
+  // Se recalcula también cuando se cargan acciones/subacciones al expandir
+  // (lazy load) — si no, una acción con fechas fuera del rango inicial
+  // (calculado solo con las etapas) quedaba con la barra mal posicionada
+  // o invisible al expandir su etapa.
+  const { inicioMs, finMs, meses } = useMemo(() => {
+    let inicio = parseFechaLocal(fechaInicioProyecto);
+    let fin = parseFechaLocal(fechaFinProyecto);
+
+    function considerar(fechaInicio, fechaFin) {
+      const fi = parseFechaLocal(fechaInicio);
+      if (fi && (!inicio || fi < inicio)) inicio = fi;
+      const ff = parseFechaLocal(fechaFin);
+      if (ff && (!fin || ff > fin)) fin = ff;
+    }
+
+    etapas.forEach(e => considerar(e.fecha_inicio, e.fecha_fin));
+    Object.values(accionesPorEtapa).forEach(lista =>
+      lista.forEach(a => considerar(a.fecha_inicio_efectiva || a.fecha_inicio, a.fecha_fin_efectiva || a.fecha_fin))
+    );
+    Object.values(subaccionesPorAccion).forEach(lista =>
+      lista.forEach(s => considerar(s.fecha_inicio_efectiva || s.fecha_inicio, s.fecha_fin_efectiva || s.fecha_fin))
+    );
+
+    if (!inicio) inicio = new Date();
+    if (!fin) fin = new Date(inicio.getTime() + 180 * 86400000);
+
+    const margenInicio = new Date(inicio.getFullYear(), inicio.getMonth(), 1);
+    const margenFin = new Date(fin.getFullYear(), fin.getMonth() + 2, 0);
+
+    const listaMeses = [];
+    const cursor = new Date(margenInicio);
+    while (cursor <= margenFin) {
+      listaMeses.push({
+        etiqueta: cursor.toLocaleDateString('es-MX', { month: 'short', year: '2-digit' }),
+        inicio: new Date(cursor),
+      });
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+
+    return { inicioMs: margenInicio.getTime(), finMs: margenFin.getTime(), meses: listaMeses };
+  }, [etapas, fechaInicioProyecto, fechaFinProyecto, accionesPorEtapa, subaccionesPorAccion]);
+
+  const rangoTotal = finMs - inicioMs || 1;
+
+  function calcularBarra(fechaInicio, fechaFin) {
+    const fiDate = parseFechaLocal(fechaInicio);
+    const ffDate = parseFechaLocal(fechaFin);
+    if (!fiDate || !ffDate) return null;
+    const fi = fiDate.getTime();
+    const ff = ffDate.getTime();
+    const left = Math.max(0, ((fi - inicioMs) / rangoTotal) * 100);
+    const width = Math.max(0.5, ((ff - fi) / rangoTotal) * 100);
+    return { left: `${left}%`, width: `${Math.min(width, 100 - left)}%` };
+  }
+
+  const hoyPos = useMemo(() => {
+    const ahora = Date.now();
+    if (ahora < inicioMs || ahora > finMs) return null;
+    return `${((ahora - inicioMs) / rangoTotal) * 100}%`;
+  }, [inicioMs, finMs, rangoTotal]);
+
+  // ─── Carga bajo demanda ──────────────────────────────────────
+  const toggleEtapa = useCallback(async (etapaId) => {
+    const yaExpandida = expandidas[etapaId];
+    setExpandidas(prev => ({ ...prev, [etapaId]: !yaExpandida }));
+    if (!yaExpandida && !accionesPorEtapa[etapaId]) {
+      try {
+        const res = await accionesApi.obtenerAccionesEtapa(etapaId);
+        setAccionesPorEtapa(prev => ({ ...prev, [etapaId]: res.datos || [] }));
+      } catch (err) {
+        console.error('Error cargando acciones para Gantt:', err);
+      }
+    }
+  }, [expandidas, accionesPorEtapa]);
+
+  const toggleAccion = useCallback(async (accionId) => {
+    const yaExpandida = accionesExpandidas[accionId];
+    setAccionesExpandidas(prev => ({ ...prev, [accionId]: !yaExpandida }));
+    if (!yaExpandida && !subaccionesPorAccion[accionId]) {
+      try {
+        const [resSubs, resTareas] = await Promise.all([
+          accionesApi.obtenerSubacciones(accionId),
+          tareasApi.obtenerTareasPorAccion(accionId),
+        ]);
+        const subs = (resSubs.datos || []).map(s => ({ ...s, _esTarea: false }));
+        // Las tareas no traen fecha_fin ni fecha_fin_efectiva (su columna
+        // se llama fecha_limite) — se normalizan aquí para que
+        // ordenarPorFechaLimite y calcularBarra, que sí leen esos dos
+        // nombres, funcionen igual sin duplicar lógica por tipo.
+        const tareas = (resTareas.datos || []).map(t => ({
+          ...t, _esTarea: true,
+          fecha_fin: t.fecha_limite, fecha_fin_efectiva: t.fecha_limite,
+        }));
+        setSubaccionesPorAccion(prev => ({ ...prev, [accionId]: [...subs, ...tareas] }));
+      } catch (err) {
+        console.error('Error cargando subacciones/tareas para Gantt:', err);
+      }
+    }
+  }, [accionesExpandidas, subaccionesPorAccion]);
+
+  // ─── Formatear fecha para tooltip ────────────────────────────
+  const fmtFecha = (f) => formatFecha(f) || '-';
+
+  // ─── Componente de fila de barra ─────────────────────────────
+  function FilaGantt({ nombre, fechaInicio, fechaFin, estado, semaforo, porcentaje, nivel, tieneHijos, estaExpandida, onToggle, esTarea }) {
+    const barra = calcularBarra(fechaInicio, fechaFin);
+    const sem = semaforo || 'gris';
+    const colorBarra = COLORES_SEMAFORO[sem];
+    const colorFondo = CHIP_BG[sem];
+    // El chip de % (abajo) pinta TEXTO sobre colorFondo — distinto del uso
+    // gráfico de colorBarra (relleno de la barra). El ámbar de texto
+    // necesita un tono más oscuro para llegar a 4.5:1 (ver SemaforoDot.jsx).
+    const colorTextoChip = sem === 'ambar' ? TEXTO_AMBAR_SOBRE_CHIP : colorBarra;
+    const pct = parseFloat(porcentaje || 0);
+
+    const paddingLeft = nivel === 0 ? 'pl-3' : nivel === 1 ? 'pl-9' : 'pl-14';
+    const altoBarra = nivel === 0 ? 'h-6' : nivel === 1 ? 'h-4' : 'h-3';
+    const bgFila = nivel === 0 ? 'hover:bg-gray-50' : nivel === 1 ? 'bg-slate-50/40 hover:bg-slate-50' : 'bg-slate-50/20 hover:bg-slate-100/50';
+
+    return (
+      <div className={`flex ${bgFila} transition-colors group`}>
+        {/* Columna de nombre */}
+        <div className={`${ANCHO_NOMBRES} flex-shrink-0 ${paddingLeft} pr-2 py-2 border-r border-gray-200 flex items-center gap-1.5 min-w-0`}>
+          {tieneHijos ? (
+            <button onClick={onToggle} className="flex-shrink-0 text-gray-400 hover:text-gray-600 p-0.5">
+              {estaExpandida ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            </button>
+          ) : (
+            <span className="w-5 flex-shrink-0" />
+          )}
+
+          {nivel === 0 && (
+            <span className="w-5 h-5 bg-guinda-50 text-guinda-600 rounded text-[10px] font-bold flex items-center justify-center flex-shrink-0">
+              <Layers size={11} />
+            </span>
+          )}
+          {esTarea && <CheckSquare size={11} className="text-amber-700 flex-shrink-0" />}
+
+          <span className={`truncate ${nivel === 0 ? 'text-xs font-semibold text-gray-800' : nivel === 1 ? 'text-[11px] font-medium text-gray-700' : 'text-[11px] text-gray-500'}`} title={nombre}>
+            {nombre}
+          </span>
+
+          {/* Chip porcentaje pequeño */}
+          <span
+            className="ml-auto text-[10px] font-bold flex-shrink-0 px-1.5 py-0.5 rounded-full"
+            style={{ backgroundColor: colorFondo, color: colorTextoChip }}
+          >
+            {pct.toFixed(0)}%
+          </span>
+        </div>
+
+        {/* Columna de barras */}
+        <div className="flex-1 relative py-2">
+          {/* Grid de meses */}
+          <div className="absolute inset-0 flex pointer-events-none">
+            {meses.map((_, i) => (
+              <div key={i} className="flex-1 border-r border-gray-100/60 last:border-r-0" />
+            ))}
+          </div>
+
+          {/* Línea de hoy */}
+          {hoyPos && (
+            <div className="absolute top-0 bottom-0 w-0.5 bg-red-400/60 z-10 pointer-events-none" style={{ left: hoyPos }} />
+          )}
+
+          {/* Barra con progreso interno */}
+          {barra && (
+            <div
+              className={`absolute top-1/2 -translate-y-1/2 ${altoBarra} rounded-md overflow-hidden cursor-pointer z-20 border border-black/5`}
+              style={barra}
+              onMouseEnter={(e) => setTooltip({
+                x: e.clientX, y: e.clientY,
+                nombre, estado, pct,
+                fechas: `${fmtFecha(fechaInicio)} a ${fmtFecha(fechaFin)}`
+              })}
+              onMouseLeave={() => setTooltip(null)}
+            >
+              {/* Fondo */}
+              <div className="absolute inset-0 opacity-60" style={{ backgroundColor: colorFondo }} />
+              {/* Progreso */}
+              <div className="absolute inset-y-0 left-0 transition-all duration-300" style={{ width: `${Math.min(pct, 100)}%`, backgroundColor: colorBarra }} />
+              {/* Texto */}
+              {nivel === 0 && (
+                <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white mix-blend-difference">
+                  {pct.toFixed(0)}%
+                </span>
+              )}
+            </div>
+          )}
+          {!barra && (
+            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-gray-300 italic">
+              Sin fechas capturadas
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Bloque 3.2: aviso informativo (no una alerta), con la lista de las
+  // actividades afectadas a un clic: el mismo principio del gris del
+  // semáforo, convertir el hueco en algo que se pueda ir a arreglar.
+  const avisoSinFecha = sinFecha.total > 0 && (
+    <div className="mb-3 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-600">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <span className="flex items-center gap-1.5">
+          <Info size={13} className="text-gray-400 flex-shrink-0" />
+          {sinFecha.total} actividad{sinFecha.total !== 1 ? 'es' : ''} no se muestra{sinFecha.total !== 1 ? 'n' : ''} aquí porque no tiene{sinFecha.total !== 1 ? 'n' : ''} fechas capturadas.
+        </span>
+        <button
+          type="button"
+          onClick={() => setMostrarListaSinFecha(v => !v)}
+          className="text-[11px] font-medium text-guinda-600 hover:text-guinda-800 flex-shrink-0"
+        >
+          {mostrarListaSinFecha ? 'Ocultar' : 'Ver cuáles'}
+        </button>
+      </div>
+      {mostrarListaSinFecha && (
+        <ul className="mt-2 pt-2 border-t border-gray-200 space-y-1">
+          {sinFecha.items.map(item => (
+            <li key={`${item.tipo}-${item.id}`} className="flex items-center gap-1.5 text-[11px] text-gray-500">
+              <span className="flex-shrink-0 font-medium text-gray-400">{ETIQUETA_TIPO_SIN_FECHA[item.tipo]}:</span>
+              <span className="truncate">{item.nombre}</span>
+              {item.contexto && <span className="text-gray-400 flex-shrink-0">(en {item.contexto})</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+
+  if (etapas.length === 0) {
+    return (
+      <div>
+        {avisoSinFecha}
+        <div className="text-center py-12 text-sm text-gray-400">
+          Sin etapas para mostrar en el cronograma.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {avisoSinFecha}
+      <div className="card overflow-hidden relative">
+      {/* Header con meses */}
+      <div className="flex border-b border-gray-200 sticky top-0 z-30 bg-white">
+        <div className={`${ANCHO_NOMBRES} flex-shrink-0 px-3 py-2.5 bg-gray-50 border-r border-gray-200`}>
+          <span className="text-xs font-semibold text-gray-600">Etapa / Acción</span>
+        </div>
+        <div className="flex-1 flex relative bg-gray-50">
+          {meses.map((mes, i) => (
+            <div key={i} className="flex-1 px-1 py-2.5 text-center text-[11px] font-medium text-gray-500 border-r border-gray-200/50 last:border-r-0">
+              {mes.etiqueta}
+            </div>
+          ))}
+          {hoyPos && (
+            <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-10" style={{ left: hoyPos }}>
+              <span className="absolute -top-0.5 -translate-x-1/2 bg-red-500 text-white text-[9px] font-bold px-1 rounded-b">HOY</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Filas */}
+      <div className="divide-y divide-gray-100/50 overflow-x-auto">
+        {etapas.map(etapa => {
+          const estaExpandida = expandidas[etapa.id];
+          const acciones = ordenarPorFechaLimite(accionesPorEtapa[etapa.id] || []);
+          const tieneAcciones = parseInt(etapa.total_acciones) > 0;
+
+          return (
+            <div key={etapa.id}>
+              {/* Fila etapa */}
+              <FilaGantt
+                nombre={etapa.nombre}
+                fechaInicio={etapa.fecha_inicio}
+                fechaFin={etapa.fecha_fin}
+                estado={etapa.estado}
+                semaforo={etapa.semaforo_efectivo}
+                porcentaje={etapa.avance_efectivo ?? etapa.porcentaje_calculado}
+                nivel={0}
+                tieneHijos={tieneAcciones}
+                estaExpandida={estaExpandida}
+                onToggle={() => toggleEtapa(etapa.id)}
+              />
+
+              {/* Acciones de la etapa */}
+              {estaExpandida && acciones.map(accion => {
+                // total_subacciones (nietas de otra acción) y total_tareas
+                // (el tercer nivel real de la jerarquía, en su propia
+                // tabla) son las dos formas en que una acción tiene hijos —
+                // antes solo se miraba total_subacciones, así que una
+                // acción con tareas pero sin subacciones no mostraba ni
+                // chevron para expandirla: sus tareas eran inalcanzables.
+                const tieneHijosAccion = parseInt(accion.total_subacciones) > 0 || parseInt(accion.total_tareas) > 0;
+                const subsExpandidas = accionesExpandidas[accion.id];
+                const subs = ordenarPorFechaLimite(subaccionesPorAccion[accion.id] || []);
+
+                return (
+                  <div key={accion.id}>
+                    <FilaGantt
+                      nombre={accion.nombre}
+                      fechaInicio={accion.fecha_inicio_efectiva || accion.fecha_inicio}
+                      fechaFin={accion.fecha_fin_efectiva || accion.fecha_fin}
+                      estado={accion.estado}
+                      semaforo={accion.semaforo_efectivo}
+                      porcentaje={accion.avance_efectivo ?? accion.porcentaje_avance}
+                      nivel={1}
+                      tieneHijos={tieneHijosAccion}
+                      estaExpandida={subsExpandidas}
+                      onToggle={() => toggleAccion(accion.id)}
+                    />
+
+                    {/* Subacciones + tareas, mezcladas y ordenadas por fecha
+                        límite — son hermanas (ambas cuelgan directo de esta
+                        acción), no dos niveles distintos. */}
+                    {subsExpandidas && subs.map(sub => (
+                      <FilaGantt
+                        key={sub.id}
+                        nombre={sub.nombre}
+                        fechaInicio={sub.fecha_inicio_efectiva || sub.fecha_inicio}
+                        fechaFin={sub.fecha_fin_efectiva || sub.fecha_fin}
+                        estado={sub.estado}
+                        semaforo={sub.semaforo_efectivo}
+                        porcentaje={sub.avance_efectivo ?? sub.porcentaje_avance}
+                        nivel={2}
+                        tieneHijos={false}
+                        esTarea={sub._esTarea}
+                      />
+                    ))}
+                  </div>
+                );
+              })}
+
+              {/* Loading */}
+              {estaExpandida && acciones.length === 0 && tieneAcciones && (
+                <div className="pl-12 py-2 text-[11px] text-gray-400 border-r border-gray-200">Cargando acciones...</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Leyenda */}
+      <div className="px-4 py-2.5 bg-gray-50 border-t border-gray-200 flex items-center gap-5 text-[11px] text-gray-500 flex-wrap">
+        {Object.entries(LEYENDA_SEMAFORO).map(([sem, texto]) => (
+          <span key={sem} className="flex items-center gap-1.5">
+            <span className="w-4 h-2.5 rounded-sm" style={{ backgroundColor: COLORES_SEMAFORO[sem] }} />
+            {texto}
+          </span>
+        ))}
+        {hoyPos && (
+          <span className="flex items-center gap-1.5">
+            <span className="w-4 h-0.5 bg-red-500" /> Hoy
+          </span>
+        )}
+        <span className="ml-auto text-gray-400">Barras muestran avance real</span>
+      </div>
+
+      {/* Tooltip flotante */}
+      {tooltip && (
+        <div
+          className="fixed z-50 bg-gray-900 text-white rounded-lg shadow-xl px-3 py-2 text-xs pointer-events-none"
+          style={{ left: tooltip.x + 12, top: tooltip.y - 10 }}
+        >
+          <p className="font-semibold mb-0.5">{tooltip.nombre}</p>
+          <p className="text-gray-300">{tooltip.fechas}</p>
+          <p className="text-gray-300">{formatearEstado(tooltip.estado)} · {tooltip.pct?.toFixed(0)}%</p>
+        </div>
+      )}
+      </div>
+    </div>
+  );
+}

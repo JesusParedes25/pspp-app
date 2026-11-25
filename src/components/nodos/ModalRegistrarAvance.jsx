@@ -1,0 +1,404 @@
+/**
+ * ARCHIVO: ModalRegistrarAvance.jsx
+ * PROPÓSITO: Modal único para reportar el estado de una etapa/acción/tarea —
+ *            sustituye los controles sueltos que antes vivían repartidos por
+ *            su lado (barra de solo porcentaje, "Marcar concluido",
+ *            "Comentar" y "Adjuntar archivo"). Un solo botón "Guardar
+ *            avance" dispara los cambios de Estado/Avance (misma
+ *            transacción del backend) más, si se llenaron, Detalle y
+ *            Evidencia — quedan uno justo después del otro en el stream de
+ *            actividad del nodo, con el mismo autor y casi el mismo
+ *            timestamp, así que se leen como un solo reporte aunque cada
+ *            uno siga viviendo en su propia fila (ver ActividadStream, que
+ *            los agrupa visualmente por eso).
+ *
+ * Es el MISMO componente para cualquier contexto que registre avance: el
+ * panel de Seguimiento > Detalle, el drawer de Diagrama y Mis actividades
+ * — no sabe ni le importa desde cuál de los tres se abrió.
+ *
+ * Se renderiza con createPortal en document.body (mismo patrón que el
+ * tooltip de AccionFicha.jsx) porque el rail de Detalle y el drawer de
+ * Diagrama posicionan su panel con translate-x — eso vuelve al `<aside>`
+ * el "containing block" de cualquier hijo con position:fixed, y el modal
+ * terminaba encajonado dentro del rail en vez de cubrir toda la pantalla.
+ */
+import { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
+import { X, Loader2, Lock, CheckCircle2, Plus } from 'lucide-react';
+import { mensajeDeError } from '../../api/transferencias';
+import ProgresoSubida from '../common/ProgresoSubida';
+import * as etapasApi from '../../api/etapas';
+import * as accionesApi from '../../api/acciones';
+import * as tareasApi from '../../api/tareas';
+import * as evidenciasApi from '../../api/evidencias';
+import * as actividadApi from '../../api/actividad';
+import { crearComentario } from '../../api/comentarios';
+import { NIVELES } from '../../config/niveles';
+import { useEnvioUnico } from '../../hooks/useEnvioUnico';
+import { agruparParaLinea } from './ActividadStream';
+import FilaDocumentoPendiente from './FilaDocumentoPendiente';
+import { useUI } from '../../context/UIContext';
+import { useCierreConDatosSinGuardar } from '../../hooks/useCierreConDatosSinGuardar';
+
+// comentarios/evidencias del modelo viejo NUNCA soportaron 'Tarea' — para
+// tarea todo cae al stream unificado `actividad` (mismo criterio que ya usa
+// NodoCard y SeccionArchivosNodo).
+const ENTIDAD_TIPO = { etapa: 'Etapa', accion: 'Accion' };
+
+// Bloqueada/Cancelada son los únicos estados donde el avance de verdad no
+// se puede tocar (Bloqueada lo rechaza el propio backend). Completada NO
+// entra aquí a propósito: "concluido" no es definitivo — quien lo marcó
+// puede necesitar corregirlo después (bajarlo a 90%, por ejemplo), así que
+// se deja editable, con la casilla "Marcar como concluida" pre-marcada
+// para que reabrirlo sea una decisión explícita, no un accidente.
+const ESTADOS_CONGELADOS = { Bloqueada: 'Bloqueada: avance congelado', Cancelada: 'Cancelada' };
+
+// Fecha relativa corta para el historial de Estatus cualitativo — mismo
+// criterio que rel() en ActividadStream.jsx, sin importarlo por ser trivial.
+function relCorto(fecha) {
+  const diff = Date.now() - new Date(fecha).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'ahora';
+  if (m < 60) return `hace ${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `hace ${h}h`;
+  return `hace ${Math.floor(h / 24)}d`;
+}
+
+async function patchNodo(tipo, id, datos) {
+  if (tipo === 'etapa') return etapasApi.patchEtapa(id, datos);
+  if (tipo === 'accion') return accionesApi.patchAccion(id, datos);
+  return tareasApi.patchTarea(id, datos);
+}
+
+async function comentarEn(tipo, id, contenido) {
+  if (ENTIDAD_TIPO[tipo]) return crearComentario({ entidad_tipo: ENTIDAD_TIPO[tipo], entidad_id: id, contenido });
+  return actividadApi.comentar(tipo, id, contenido);
+}
+
+async function adjuntarEvidencia(tipo, id, { archivo, url, categoria, notas, titulo }, opciones = {}) {
+  const metadatos = { categoria: categoria || 'Otro', notas: notas?.trim() || null, titulo: titulo?.trim() || null };
+  if (url) {
+    if (tipo === 'tarea') return actividadApi.registrarLinkActividad(tipo, id, url, metadatos);
+    if (tipo === 'etapa') return evidenciasApi.registrarLinkEtapa(id, url, metadatos);
+    return evidenciasApi.registrarLinkAccion(id, url, metadatos);
+  }
+  if (tipo === 'tarea') return actividadApi.subirArchivoActividad(tipo, id, archivo, metadatos, opciones);
+  if (tipo === 'etapa') return evidenciasApi.subirEvidenciaEtapa(id, archivo, metadatos, opciones);
+  return evidenciasApi.subirEvidenciaAccion(id, archivo, metadatos, opciones);
+}
+
+let contadorEvidencia = 0;
+const idEvidencia = () => `ev${++contadorEvidencia}`;
+
+export default function ModalRegistrarAvance({ tipo, nodo, esContenedor = false, completarAlAbrir = false, onGuardado, onCerrar }) {
+  const { mostrarToast } = useUI();
+  const nivel = NIVELES[tipo];
+  const avanceActual = Math.round(nodo.avance_actual ?? nodo.avance_efectivo ?? 0);
+  const estadoActual = nodo.estado || 'Pendiente';
+  const congelado = ESTADOS_CONGELADOS[estadoActual];
+
+  // Arranca vacío a propósito — antes traía el estatus cualitativo
+  // anterior ya escrito, como si fuera un valor por defecto, y había que
+  // borrarlo a mano para reportar el nuevo. El anterior se ve abajo, en
+  // el historial tenue, en vez de colarse en el campo activo.
+  const [estatus, setEstatus] = useState('');
+  const [avance, setAvance] = useState(Math.min(avanceActual, 99));
+  // completarAlAbrir: atajo "Marcar como completada" del encabezado de
+  // Detalle — pre-marca la casilla al abrir en vez de dejar al usuario
+  // repetir el mismo clic que ya dio para llegar aquí.
+  const [concluir, setConcluir] = useState(estadoActual === 'Completada' || completarAlAbrir);
+  const [detalle, setDetalle] = useState('');
+  // Cada evidencia: { id, modo: 'archivo'|'liga', archivo, url, categoria, notas }.
+  // Un archivo elegido con el picker en modo múltiple, o una liga agregada a
+  // mano, cada una con su propia categoría y nota opcionales — así el
+  // usuario no tiene que abrir el modal de nuevo para dejar una segunda
+  // evidencia del mismo reporte.
+  const [evidencias, setEvidencias] = useState([]);
+  const [error, setError] = useState('');
+  const [subida, setSubida] = useState(null); // { nombre, fraccion } del archivo en curso
+  // Historial de Estatus cualitativo — carga silenciosa, aparte del resto
+  // del modal (que es usable de inmediato con o sin esto todavía cargado).
+  const [historialRaw, setHistorialRaw] = useState([]);
+
+  const puedeCapturarAvance = !esContenedor && !congelado;
+
+  useEffect(() => {
+    let vivo = true;
+    actividadApi.obtenerActividadNodo(tipo, nodo.id)
+      .then(res => { if (vivo) setHistorialRaw(res.datos || []); })
+      .catch(() => { if (vivo) setHistorialRaw([]); });
+    return () => { vivo = false; };
+  }, [tipo, nodo.id]);
+
+  // De cada grupo (misma correlación autor+15s que ya usa ActividadStream
+  // para el feed completo) que trae un estatus_cualitativo, se arma una
+  // entrada de historial con el avance del mismo reporte si lo hubo.
+  const historial = useMemo(() => {
+    const grupos = agruparParaLinea(historialRaw);
+    const entradas = [];
+    for (const g of grupos) {
+      const estatusEv = g.eventos.find(e => e.tipo_evento === 'estatus_cualitativo');
+      if (!estatusEv) continue;
+      const avanceEv = g.eventos.find(e => e.tipo_evento === 'cambio_avance');
+      const estadoEv = g.eventos.find(e => e.tipo_evento === 'cambio_estatus');
+      let avanceGrupo = null;
+      if (avanceEv?.metadata?.avance_actual != null) avanceGrupo = Math.round(parseFloat(avanceEv.metadata.avance_actual));
+      else if (estadoEv?.metadata?.estado === 'Completada') avanceGrupo = 100;
+      else if (estadoEv?.metadata?.estado === 'Pendiente') avanceGrupo = 0;
+      entradas.push({ id: estatusEv.id, fecha: estatusEv.created_at, texto: estatusEv.contenido, avance: avanceGrupo });
+    }
+    return entradas.slice(0, 5);
+  }, [historialRaw]);
+
+  function agregarArchivos(fileList) {
+    // titulo se prellena con el nombre del archivo (editable después) — en
+    // modo liga no hay de dónde prellenarlo, arranca vacío.
+    const nuevos = Array.from(fileList).map(archivo => ({
+      id: idEvidencia(), modo: 'archivo', archivo, url: '', categoria: 'Otro', notas: '', titulo: archivo.name,
+    }));
+    setEvidencias(prev => [...prev, ...nuevos]);
+  }
+  function agregarLiga() {
+    setEvidencias(prev => [...prev, { id: idEvidencia(), modo: 'liga', archivo: null, url: '', categoria: 'Otro', notas: '', titulo: '' }]);
+  }
+  function actualizarEvidencia(id, campo, valor) {
+    setEvidencias(prev => prev.map(ev => (ev.id === id ? { ...ev, [campo]: valor } : ev)));
+  }
+  function quitarEvidencia(id) {
+    setEvidencias(prev => prev.filter(ev => ev.id !== id));
+  }
+
+  // useEnvioUnico ya trae su propio candado síncrono (useRef) contra
+  // doble-submit — dos clics casi simultáneos (doble clic, o Enter +
+  // clic) antes ejecutaban el cuerpo completo dos veces porque
+  // `guardando` es estado de React (asíncrono); sin candado síncrono, un
+  // reporte con estatus/avance + evidencia podía quedar duplicado por
+  // completo en el stream de actividad.
+  const [guardar, guardando] = useEnvioUnico(async () => {
+    if (!puedeGuardar) return;
+    setError('');
+    try {
+      const datos = { estatus_cualitativo: estatus.trim() };
+      if (puedeCapturarAvance) {
+        if (concluir) {
+          // Ya estaba Completada y se dejó la casilla tal cual: no hay
+          // transición real, no hace falta reenviar el estado (evita un
+          // "Estatus cambiado a Completada" fantasma en la actividad).
+          if (estadoActual !== 'Completada') datos.estado = 'Completada';
+        } else if (avance !== avanceActual || estadoActual === 'Pendiente') {
+          datos.avance_actual = avance;
+          if (estadoActual !== 'En_proceso') datos.estado = 'En_proceso';
+        }
+      }
+      await patchNodo(tipo, nodo.id, datos);
+
+      if (detalle.trim()) await comentarEn(tipo, nodo.id, detalle.trim());
+
+      // Secuencial, no Promise.all: son peticiones multipart contra el
+      // mismo nodo — más simple de seguir en el log del servidor y evita
+      // sorpresas de orden si una evidencia depende de otra en el futuro.
+      for (const ev of evidencias) {
+        if (ev.modo === 'archivo') {
+          const nombre = ev.archivo.name;
+          setSubida({ nombre, fraccion: 0 });
+          try {
+            await adjuntarEvidencia(tipo, nodo.id, { archivo: ev.archivo, categoria: ev.categoria, notas: ev.notas, titulo: ev.titulo },
+              { onProgreso: (fraccion) => setSubida({ nombre, fraccion }) });
+          } catch (errSubida) {
+            // El avance/estatus ya se guardó arriba: decirlo, para que no
+            // se reporte dos veces, y nombrar el archivo que falló.
+            errSubida.mensajePspp = `El avance se guardó, pero no se pudo subir «${nombre}». ${mensajeDeError(errSubida, 'Inténtalo de nuevo desde Documentos.')}`;
+            throw errSubida;
+          }
+        } else if (ev.url.trim()) await adjuntarEvidencia(tipo, nodo.id, { url: ev.url.trim(), categoria: ev.categoria, notas: ev.notas, titulo: ev.titulo });
+      }
+      setSubida(null);
+
+      await onGuardado?.();
+      mostrarToast('Avance guardado', 'exito');
+      onCerrar?.();
+    } catch (err) {
+      setSubida(null);
+      setError(err.mensajePspp || mensajeDeError(err, 'No se pudo guardar el avance.'));
+    }
+  });
+
+  const puedeGuardar = estatus.trim().length > 0 && !guardando
+    && evidencias.every(ev => ev.modo === 'archivo' || ev.url.trim().length > 0);
+
+  // Antes, un clic fuera del modal (fácil de hacer sin querer al volver de
+  // otra pestaña — ej. copiar una liga y regresar) lo cerraba sin avisar,
+  // y con eso se perdía todo lo capturado. useCierreConDatosSinGuardar
+  // ignora ese clic mientras haya algo sin guardar; cerrar a propósito (X
+  // o Cancelar) sigue funcionando, solo pide confirmar cuando de verdad
+  // hay algo que se perdería.
+  const hayCambiosSinGuardar = estatus.trim().length > 0
+    || detalle.trim().length > 0
+    || evidencias.length > 0
+    || (puedeCapturarAvance && concluir !== (estadoActual === 'Completada'))
+    || (puedeCapturarAvance && !concluir && avance !== Math.min(avanceActual, 99));
+
+  const { cerrarConConfirmacion } = useCierreConDatosSinGuardar(hayCambiosSinGuardar, onCerrar);
+
+  return createPortal((
+    <div className="fixed inset-0 bg-black/40 z-[9999] flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-start justify-between px-5 py-4 border-b border-gray-100 flex-shrink-0">
+          <div>
+            <h3 className="text-base font-semibold text-gray-900">Registrar avance</h3>
+            <p className="text-xs text-gray-400 mt-0.5">{nivel.label} · {nodo.nombre}</p>
+          </div>
+          <button onClick={cerrarConConfirmacion} className="p-1 text-gray-400 hover:text-gray-700 rounded hover:bg-gray-100 flex-shrink-0"><X size={18} /></button>
+        </div>
+
+        <div className="px-5 py-4 space-y-4 overflow-y-auto">
+          {/* Nota de avance — mismo nombre que usa el resto de la app
+              (Tablero, Panorama del proyecto, Carteras: ver
+              TituloEstatusCualitativo) para esta nota corta. Se llamaba
+              "Estatus cualitativo" y compartía la palabra "Estatus" con el
+              eje de estados real (Pendiente/En_proceso/Bloqueada/
+              Completada/Cancelada), que vive en su propio control en
+              Ficha, no aquí — de ahí la confusión y el cambio de nombre.
+              El campo de la API/base de datos sigue llamándose
+              estatus_cualitativo (ver `datos` más abajo); esto es solo la
+              etiqueta visible. */}
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Nota de avance <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={estatus}
+              onChange={e => setEstatus(e.target.value)}
+              placeholder="¿en una frase, cómo va esto?"
+              maxLength={200}
+              autoFocus
+              className="input-base text-sm w-full"
+            />
+            {/* Historial tenue — línea de tiempo de referencia, no un
+                valor por defecto: cada nota anterior con su avance del
+                mismo reporte, cuando lo hubo. */}
+            {historial.length > 0 && (
+              <div className="mt-2 pl-2.5 border-l-2 border-gray-100 space-y-1.5">
+                {historial.map(h => (
+                  <p key={h.id} className="text-[11px] leading-snug text-gray-400">
+                    <span>{relCorto(h.fecha)}</span>
+                    {h.avance != null && <span> · {h.avance}%</span>}
+                    <span className="italic text-gray-500"> "{h.texto}"</span>
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Avance */}
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Avance</label>
+            {!puedeCapturarAvance ? (
+              <div className="flex items-start gap-1.5 text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5">
+                <Lock size={13} className="flex-shrink-0 mt-0.5" />
+                <span>
+                  <strong className="text-gray-700">{esContenedor ? avanceActual : Math.round(nodo.avance_actual ?? 0)}%</strong>
+                  {': '}
+                  {esContenedor
+                    ? 'se calcula automáticamente a partir de sus partes.'
+                    : (congelado || '')}
+                </span>
+              </div>
+            ) : (
+              <>
+                <label className="flex items-center gap-2 text-xs text-gray-600 mb-1">
+                  <input type="checkbox" checked={concluir} onChange={e => setConcluir(e.target.checked)} className="accent-guinda-600" />
+                  Marcar como concluida
+                </label>
+                {estadoActual === 'Completada' && concluir && (
+                  <p className="text-[10px] text-gray-400 mb-2 ml-5">Ya estaba marcada como concluida. Desmarca la casilla si necesitas corregir el avance.</p>
+                )}
+                {!concluir ? (
+                  <div className="flex items-center gap-2">
+                    <input type="range" min={0} max={99} value={avance} onChange={e => setAvance(Number(e.target.value))} className="flex-1 accent-guinda-600" />
+                    <span className="text-sm font-bold tabular-nums w-10 text-right">{avance}%</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+                    <CheckCircle2 size={13} /> Se guardará como 100% concluida.
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Detalle — visible de entrada, no detrás de un "Agregar
+              detalle": es donde se explica qué pasó, lo más valioso del
+              registro, así que no tiene sentido esconderlo. */}
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Detalle <span className="text-gray-400 font-normal">(opcional)</span>
+            </label>
+            <textarea
+              value={detalle}
+              onChange={e => setDetalle(e.target.value)}
+              rows={3}
+              placeholder="Cuenta con más contexto qué pasó..."
+              className="input-base text-sm w-full resize-none"
+            />
+          </div>
+
+          {/* Adjuntar documento (opcional) — una o varias, cada una con su
+              propio título, categoría y nota opcionales. Filas compactas
+              tipo tabla en vez de un formulario por documento, para que
+              agregar 3 o 4 (el caso típico al cerrar un lote de trabajo)
+              no signifique abrir el modal varias veces. Se guarda en el
+              mismo listado de documentos del nodo que el botón
+              independiente "Adjuntar documento" del panel — misma fuente
+              de datos, solo otra ruta para llegar a ella. */}
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Adjuntar documento <span className="text-gray-400 font-normal">(opcional)</span>
+            </label>
+
+            {evidencias.length > 0 && (
+              <div className="space-y-1.5 mb-2">
+                {evidencias.map(ev => (
+                  <FilaDocumentoPendiente
+                    key={ev.id}
+                    item={ev}
+                    onCambiar={(campo, valor) => actualizarEvidencia(ev.id, campo, valor)}
+                    onQuitar={() => quitarEvidencia(ev.id)}
+                  />
+                ))}
+              </div>
+            )}
+
+            <div className="flex items-center gap-1.5">
+              <label className="flex items-center gap-1.5 text-xs font-medium text-gray-600 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50 cursor-pointer">
+                <Plus size={13} /> Archivo
+                <input type="file" multiple className="hidden" onChange={e => { agregarArchivos(e.target.files); e.target.value = ''; }} />
+              </label>
+              <button onClick={agregarLiga}
+                className="flex items-center gap-1.5 text-xs font-medium text-gray-600 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
+                <Plus size={13} /> Liga
+              </button>
+            </div>
+          </div>
+
+          {subida && <ProgresoSubida nombre={subida.nombre} fraccion={subida.fraccion} />}
+          {error && <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2 leading-snug">{error}</p>}
+        </div>
+
+        <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-gray-100 flex-shrink-0">
+          <button onClick={cerrarConConfirmacion} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">Cancelar</button>
+          <button
+            onClick={guardar}
+            disabled={!puedeGuardar}
+            className="px-4 py-2 text-sm font-medium text-white bg-guinda-700 rounded-lg disabled:opacity-50 flex items-center gap-2"
+          >
+            {guardando && <Loader2 size={14} className="animate-spin" />}
+            Guardar avance
+          </button>
+        </div>
+      </div>
+    </div>
+  ), document.body);
+}

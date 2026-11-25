@@ -1,0 +1,656 @@
+/**
+ * ARCHIVO: ModalEditarProyecto.jsx
+ * PROPÓSITO: Modal completo para editar todos los campos de un proyecto,
+ *            incluyendo indicadores propios (crear/editar/eliminar) y etiquetas.
+ *
+ * NOTA TÉCNICA: Edición completa de proyecto
+ * ─────────────────────────────────────────────────────────────────
+ * Pre-carga todos los campos del proyecto existente. Permite modificar
+ * información general, clasificación, DG líder, programa, fechas,
+ * indicadores y etiquetas. Los indicadores nuevos se crean vía POST,
+ * los existentes se actualizan vía PUT, y los eliminados vía DELETE.
+ * ─────────────────────────────────────────────────────────────────
+ */
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { X, Plus, Trash2, ChevronDown, ChevronUp, ImagePlus } from 'lucide-react';
+import { mensajeDeError } from '../../api/transferencias';
+import * as catalogosApi from '../../api/catalogos';
+import * as proyectosApi from '../../api/proyectos';
+import * as indicadoresApi from '../../api/indicadores';
+import SelectorIndicadorCatalogo from '../indicadores/SelectorIndicadorCatalogo';
+import EtiquetasChipInput from '../common/EtiquetasChipInput';
+import * as etapasApi from '../../api/etapas';
+import * as accionesApi from '../../api/acciones';
+import { usePermisosProyecto } from '../../hooks/usePermisos';
+import { useEnvioUnico } from '../../hooks/useEnvioUnico';
+import { useUI } from '../../context/UIContext';
+import { etiquetaUnidadIndicador } from '../../utils/formatoMoneda';
+import { TIPOS_INDICADOR, indicadorProyectoVacio, conDefaultsPorTipo } from '../../utils/tiposIndicador';
+import CamposIndicadorProyecto from '../indicadores/CamposIndicadorProyecto';
+
+const INDICADOR_NUEVO = () => ({
+  _key: Date.now() + Math.random(),
+  _esNuevo: true,
+  ...indicadorProyectoVacio(),
+});
+
+export default function ModalEditarProyecto({ proyecto, onCerrar, onGuardado }) {
+  const { mostrarToast } = useUI();
+  const permisos = usePermisosProyecto(proyecto);
+  const [dgs, setDgs]                       = useState([]);
+  const [programas, setProgramas]           = useState([]);
+  const [direccionesArea, setDireccionesArea] = useState([]);
+  const [cargando, setCargando]             = useState(true);
+  const [mostrarCatalogoInd, setMostrarCatalogoInd] = useState(false);
+  const [imagenPortada, setImagenPortada]   = useState(null);
+  const [previewPortada, setPreviewPortada] = useState(proyectosApi.urlImagenProyecto(proyecto));
+  const [estructuraEtapas, setEstructuraEtapas] = useState([]);
+  const [accionesPorEtapa, setAccionesPorEtapa] = useState({});
+  const [etapaExpandida, setEtapaExpandida] = useState(null);
+  const [nuevaEtapaNombre, setNuevaEtapaNombre] = useState('');
+  const [nuevaAccionNombre, setNuevaAccionNombre] = useState({});
+  const [creandoEtapa, setCreandoEtapa] = useState(false);
+  const [creandoAccion, setCreandoAccion] = useState({});
+  const refImagen   = useRef(null);
+
+  const [datos, setDatos] = useState({
+    nombre:                  proyecto.nombre || '',
+    descripcion:             proyecto.descripcion || '',
+    tipo:                    proyecto.tipo || 'Analisis_tecnico',
+    meta_descripcion:        proyecto.meta_descripcion || '',
+    es_prioritario:          proyecto.es_prioritario || false,
+    ciclo_anual:             proyecto.ciclo_anual || false,
+    dependencia_externa:     proyecto.dependencia_externa || false,
+    descripcion_dependencia: proyecto.descripcion_dependencia || '',
+    tiene_subproyectos:      proyecto.tiene_subproyectos || false,
+    fecha_inicio:            proyecto.fecha_inicio ? proyecto.fecha_inicio.slice(0, 10) : '',
+    fecha_limite:            proyecto.fecha_limite ? proyecto.fecha_limite.slice(0, 10) : '',
+    id_dg_lider:             proyecto.id_dg_lider || '',
+    id_direccion_area_lider: proyecto.id_direccion_area_lider || '',
+    id_programa:             proyecto.id_programa || '',
+    etiquetas:               [],
+    indicadores:             [],
+  });
+
+  useEffect(() => {
+    async function cargar() {
+      try {
+        const [resDgs, resProg, resDA, resEtiq, resInds] = await Promise.all([
+          catalogosApi.obtenerDGs(),
+          catalogosApi.obtenerProgramas(),
+          catalogosApi.obtenerDireccionesArea(),
+          proyectosApi.obtenerEtiquetasProyecto(proyecto.id),
+          obtenerIndicadoresProyecto(proyecto.id),
+        ]);
+        setDgs(resDgs.datos || []);
+        setProgramas(resProg.datos || []);
+        setDireccionesArea(resDA.datos || []);
+        const etiquetas = (resEtiq.datos || []).map(e => e.nombre);
+        const indicadores = (resInds || []).map(ind => ({
+          ...ind,
+          _key: ind.id,
+          _esNuevo: false,
+          _abierto: false,
+          metas_anuales: ind.metas_anuales || [],
+          categorias: ind.categorias || [],
+        }));
+        setDatos(prev => ({ ...prev, etiquetas, indicadores }));
+      } catch (err) {
+        console.error('Error cargando datos del modal:', err);
+      } finally {
+        setCargando(false);
+      }
+    }
+    cargar();
+  }, [proyecto.id]);
+
+  // ── Estructura: Etapas + Acciones ──
+  const cargarEstructura = useCallback(async () => {
+    try {
+      const res = await etapasApi.obtenerEtapasProyecto(proyecto.id);
+      setEstructuraEtapas(res.datos || []);
+    } catch { /* silenciar */ }
+  }, [proyecto.id]);
+
+  useEffect(() => { cargarEstructura(); }, [cargarEstructura]);
+
+  async function cargarAccionesEtapa(etapaId) {
+    try {
+      const res = await accionesApi.obtenerAccionesEtapa(etapaId);
+      setAccionesPorEtapa(prev => ({ ...prev, [etapaId]: res.datos || [] }));
+    } catch { /* silenciar */ }
+  }
+
+  async function agregarEtapaRapida() {
+    if (!nuevaEtapaNombre.trim() || creandoEtapa) return;
+    setCreandoEtapa(true);
+    try {
+      await etapasApi.crearEtapa(proyecto.id, { nombre: nuevaEtapaNombre.trim() });
+      setNuevaEtapaNombre('');
+      cargarEstructura();
+    } catch { /* silenciar */ }
+    finally { setCreandoEtapa(false); }
+  }
+
+  async function eliminarEtapaRapida(etapaId) {
+    if (!confirm('¿Eliminar esta etapa y todas sus acciones?')) return;
+    try {
+      await etapasApi.eliminarEtapa(etapaId);
+      cargarEstructura();
+    } catch { /* silenciar */ }
+  }
+
+  async function agregarAccionRapida(etapaId) {
+    const nombre = (nuevaAccionNombre[etapaId] || '').trim();
+    if (!nombre || creandoAccion[etapaId]) return;
+    setCreandoAccion(prev => ({ ...prev, [etapaId]: true }));
+    try {
+      await accionesApi.crearAccionEnEtapa(etapaId, { nombre });
+      setNuevaAccionNombre(prev => ({ ...prev, [etapaId]: '' }));
+      cargarAccionesEtapa(etapaId);
+    } catch { /* silenciar */ }
+    finally { setCreandoAccion(prev => ({ ...prev, [etapaId]: false })); }
+  }
+
+  async function eliminarAccionRapida(accionId, etapaId) {
+    if (!confirm('¿Eliminar esta acción?')) return;
+    try {
+      await accionesApi.eliminarAccion(accionId);
+      cargarAccionesEtapa(etapaId);
+      cargarEstructura();
+    } catch { /* silenciar */ }
+  }
+
+  async function agregarAccionDirectaRapida() {
+    const nombre = (nuevaAccionNombre['directa'] || '').trim();
+    if (!nombre || creandoAccion['directa']) return;
+    setCreandoAccion(prev => ({ ...prev, directa: true }));
+    try {
+      await accionesApi.crearAccionEnProyecto(proyecto.id, { nombre });
+      setNuevaAccionNombre(prev => ({ ...prev, directa: '' }));
+      cargarAccionesDirectasModal();
+    } catch { /* silenciar */ }
+    finally { setCreandoAccion(prev => ({ ...prev, directa: false })); }
+  }
+
+  const [accionesDirectasModal, setAccionesDirectasModal] = useState([]);
+  const cargarAccionesDirectasModal = useCallback(async () => {
+    try {
+      const res = await accionesApi.obtenerAccionesDirectas(proyecto.id);
+      setAccionesDirectasModal(res.datos || []);
+    } catch { /* silenciar */ }
+  }, [proyecto.id]);
+  useEffect(() => { cargarAccionesDirectasModal(); }, [cargarAccionesDirectasModal]);
+
+  async function obtenerIndicadoresProyecto(proyectoId) {
+    try {
+      const res = await indicadoresApi.obtenerIndicadoresProyecto(proyectoId);
+      return res.datos || [];
+    } catch { return []; }
+  }
+
+  function actualizar(campo, valor) {
+    setDatos(prev => ({ ...prev, [campo]: valor }));
+  }
+
+  function seleccionarImagen(e) {
+    const archivo = e.target.files[0];
+    if (!archivo) return;
+    setImagenPortada(archivo);
+    setPreviewPortada(URL.createObjectURL(archivo));
+  }
+
+  // Los indicadores se eligen del catálogo compartido (ver
+  // SelectorIndicadorCatalogo): tecleados a mano, el mismo indicador
+  // terminaba escrito distinto en cada proyecto y no se podía consolidar.
+  function agregarDelCatalogo(delCatalogo) {
+    setDatos(prev => ({
+      ...prev,
+      indicadores: [...prev.indicadores, conDefaultsPorTipo({
+        ...INDICADOR_NUEVO(),
+        id_catalogo: delCatalogo.id,
+        nombre: delCatalogo.nombre,
+        tipo: delCatalogo.tipo,
+        unidad: delCatalogo.unidad,
+        unidad_personalizada: delCatalogo.unidad_personalizada || '',
+        descripcion: delCatalogo.descripcion || '',
+      })],
+    }));
+    setMostrarCatalogoInd(false);
+  }
+
+  function actualizarIndicador(key, patch) {
+    setDatos(prev => ({
+      ...prev,
+      indicadores: prev.indicadores.map(ind =>
+        ind._key === key ? { ...ind, ...patch } : ind
+      ),
+    }));
+  }
+
+  function toggleIndicador(key) {
+    setDatos(prev => ({
+      ...prev,
+      indicadores: prev.indicadores.map(ind =>
+        ind._key === key ? { ...ind, _abierto: !ind._abierto } : ind
+      ),
+    }));
+  }
+
+  function eliminarIndicador(key) {
+    setDatos(prev => ({
+      ...prev,
+      indicadores: prev.indicadores.map(ind =>
+        ind._key === key ? { ...ind, _eliminado: true, _abierto: false } : ind
+      ),
+    }));
+  }
+
+  const [guardar, enviando] = useEnvioUnico(async () => {
+    if (!datos.nombre.trim()) return;
+    try {
+      // 1. Verificar cascade deletes antes de proceder
+      const eliminados = datos.indicadores.filter(i => i._eliminado && !i._esNuevo);
+      for (const ind of eliminados) {
+        const check = await indicadoresApi.eliminarIndicadorConConfirm(ind.id, false);
+        if (check.requiere_confirmacion) {
+          const ok = confirm(check.mensaje + '\n\n¿Deseas continuar?');
+          if (!ok) return;
+        }
+      }
+
+      // 2. Actualizar proyecto (solo campos de proyecto, no indicadores)
+      await proyectosApi.actualizarProyecto(proyecto.id, {
+        ...datos,
+        indicadores: undefined,
+      });
+
+      // 3. Imagen
+      if (imagenPortada) {
+        await proyectosApi.subirImagenProyecto(proyecto.id, imagenPortada);
+      }
+
+      // 4. Indicadores: eliminar confirmados, crear nuevos, actualizar existentes
+      for (const ind of datos.indicadores) {
+        if (ind._eliminado && !ind._esNuevo) {
+          await indicadoresApi.eliminarIndicadorConConfirm(ind.id, true);
+        } else if (ind._esNuevo && !ind._eliminado && ind.nombre.trim()) {
+          await indicadoresApi.crearIndicador(proyecto.id, ind);
+        } else if (!ind._esNuevo && !ind._eliminado && ind.nombre.trim()) {
+          await indicadoresApi.actualizarIndicador(ind.id, ind);
+        }
+      }
+
+      onGuardado && onGuardado();
+      onCerrar();
+    } catch (err) {
+      mostrarToast(mensajeDeError(err, 'Error al guardar el proyecto.'), 'error');
+    }
+  });
+
+  const dasFiltradas = direccionesArea.filter(da => {
+    if (!datos.id_dg_lider) return true;
+    const dg = dgs.find(d => String(d.id) === String(datos.id_dg_lider));
+    return dg && da.dg_siglas === dg.siglas;
+  });
+
+  const indicadoresVisibles = datos.indicadores.filter(ind => !ind._eliminado);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Editar proyecto</h2>
+            <p className="text-xs text-gray-400 mt-0.5 truncate max-w-md">{proyecto.nombre}</p>
+          </div>
+          <button onClick={onCerrar} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors">
+            <X size={18} className="text-gray-400" />
+          </button>
+        </div>
+
+        {/* Cuerpo scrollable */}
+        {cargando ? (
+          <div className="flex-1 flex items-center justify-center text-sm text-gray-400 animate-pulse p-8">
+            Cargando datos del proyecto…
+          </div>
+        ) : (
+          <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+
+            {/* ── SECCIÓN: Información general ── */}
+            <Section titulo="Información general">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre del proyecto *</label>
+                <input type="text" value={datos.nombre} onChange={e => actualizar('nombre', e.target.value)}
+                  className="input-base" placeholder="Nombre del proyecto" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Descripción</label>
+                <textarea value={datos.descripcion} onChange={e => actualizar('descripcion', e.target.value)}
+                  rows={3} className="input-base resize-none" placeholder="Describe brevemente el proyecto…" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Imagen de encabezado <span className="text-gray-400 font-normal">(opcional)</span></label>
+                {previewPortada ? (
+                  <div className="relative h-28 rounded-lg overflow-hidden border border-gray-200">
+                    <img src={previewPortada} alt="Preview" className="w-full h-full object-cover" />
+                    <button type="button"
+                      onClick={() => { setImagenPortada(null); setPreviewPortada(null); if (refImagen.current) refImagen.current.value = ''; }}
+                      className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white rounded-full p-1">
+                      <X size={13} />
+                    </button>
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => refImagen.current?.click()}
+                    className="flex items-center gap-2 w-full h-20 border-2 border-dashed border-gray-300 hover:border-guinda-400 rounded-lg justify-center text-sm text-gray-400 hover:text-guinda-500 transition-colors">
+                    <ImagePlus size={18} /> Seleccionar imagen
+                  </button>
+                )}
+                <input ref={refImagen} type="file" accept="image/*" onChange={seleccionarImagen} className="hidden" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Fecha de inicio</label>
+                  <input type="date" value={datos.fecha_inicio} onChange={e => actualizar('fecha_inicio', e.target.value)} className="input-base" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Fecha límite</label>
+                  <input type="date" value={datos.fecha_limite} onChange={e => actualizar('fecha_limite', e.target.value)} className="input-base" />
+                </div>
+              </div>
+            </Section>
+
+            {/* ── SECCIÓN: Clasificación ── */}
+            <Section titulo="Clasificación">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Tipo de proyecto</label>
+                <select value={datos.tipo} onChange={e => actualizar('tipo', e.target.value)} className="input-base">
+                  <option value="Analisis_tecnico">Análisis técnico</option>
+                  <option value="Obra_fisica">Obra física</option>
+                  <option value="Programa_masivo">Programa masivo</option>
+                  <option value="Regularizacion">Regularización</option>
+                  <option value="Proceso_recurrente">Proceso recurrente</option>
+                  <option value="Instrumento_planeacion">Instrumento de planeación</option>
+                  <option value="Conflicto_agrario">Conflicto agrario</option>
+                  <option value="Otro">Otro</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Meta del proyecto</label>
+                <textarea value={datos.meta_descripcion} onChange={e => actualizar('meta_descripcion', e.target.value)}
+                  rows={2} className="input-base resize-none" placeholder="Ej: Regularizar 92 ZMs a nivel nacional…" />
+              </div>
+              <div className="flex flex-col gap-2.5">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={!!datos.es_prioritario} onChange={e => actualizar('es_prioritario', e.target.checked)}
+                    className="rounded border-gray-300 text-guinda-500 focus:ring-guinda-500" />
+                  <span className="text-sm text-gray-700">Proyecto prioritario</span>
+                </label>
+              </div>
+            </Section>
+
+            {/* ── SECCIÓN: Organización ── */}
+            <Section titulo="Organización">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">DG Líder</label>
+                <select value={datos.id_dg_lider}
+                  onChange={e => setDatos(prev => ({ ...prev, id_dg_lider: e.target.value, id_direccion_area_lider: '' }))}
+                  className="input-base">
+                  <option value="">Seleccionar DG…</option>
+                  {dgs.map(dg => <option key={dg.id} value={dg.id}>{dg.siglas} ({dg.nombre})</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Dirección de área líder</label>
+                <select value={datos.id_direccion_area_lider} onChange={e => actualizar('id_direccion_area_lider', e.target.value)} className="input-base">
+                  <option value="">Sin especificar</option>
+                  {dasFiltradas.map(da => <option key={da.id} value={da.id}>{da.siglas} ({da.nombre})</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Programa presupuestario</label>
+                <select value={datos.id_programa} onChange={e => actualizar('id_programa', e.target.value)} className="input-base">
+                  <option value="">Sin programa específico</option>
+                  {(() => {
+                    const dg = dgs.find(d => String(d.id) === String(datos.id_dg_lider));
+                    const siglas = dg?.siglas || '';
+                    const relacionados = programas.filter(p => siglas && p.unidad_responsable?.includes(siglas));
+                    const otros = programas.filter(p => !relacionados.includes(p));
+                    return (
+                      <>
+                        {relacionados.length > 0 && (
+                          <optgroup label={`Programas de ${siglas}`}>
+                            {relacionados.map(p => <option key={p.id} value={p.id}>{p.clave} ({p.nombre})</option>)}
+                          </optgroup>
+                        )}
+                        <optgroup label={relacionados.length > 0 ? 'Otros programas' : 'Programas presupuestarios'}>
+                          {otros.map(p => <option key={p.id} value={p.id}>{p.clave} ({p.nombre})</option>)}
+                        </optgroup>
+                        {/* El programa del proyecto puede haberse desactivado
+                            desde el panel: ya no viene en la lista, pero el
+                            proyecto lo conserva. Sin esta opción el campo se
+                            vería vacío y parecería que no tiene ninguno. */}
+                        {datos.id_programa && !programas.some(p => String(p.id) === String(datos.id_programa)) && (
+                          <optgroup label="Programa actual (ya no se ofrece)">
+                            <option value={datos.id_programa}>
+                              {proyecto?.programa_clave ? `${proyecto.programa_clave}: ` : ''}
+                              {proyecto?.programa_nombre || 'Programa retirado del catálogo'}
+                            </option>
+                          </optgroup>
+                        )}
+                      </>
+                    );
+                  })()}
+                </select>
+                {datos.id_programa && (() => {
+                  const prog = programas.find(p => String(p.id) === String(datos.id_programa));
+                  if (!prog) return null;
+                  return (
+                    <div className="mt-1.5 px-3 py-2 bg-gray-50 rounded-lg text-xs text-gray-500 space-y-0.5">
+                      {prog.unidad_responsable && <p><span className="font-medium text-gray-600">UR:</span> {prog.unidad_responsable}</p>}
+                      {prog.descripcion && <p>{prog.descripcion}</p>}
+                    </div>
+                  );
+                })()}
+              </div>
+            </Section>
+
+            {/* ── SECCIÓN: Indicadores ── */}
+            <Section titulo="Indicadores">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-gray-400">Indicadores cuantitativos de avance del proyecto.</p>
+                <button type="button" onClick={() => setMostrarCatalogoInd(true)}
+                  className="text-xs text-guinda-600 hover:text-guinda-700 font-medium flex items-center gap-1">
+                  <Plus size={13} /> Agregar
+                </button>
+              </div>
+              {mostrarCatalogoInd && (
+                <SelectorIndicadorCatalogo
+                  yaUsados={datos.indicadores.map(i => i.id_catalogo)}
+                  onCerrar={() => setMostrarCatalogoInd(false)}
+                  onElegir={agregarDelCatalogo}
+                />
+              )}
+              {indicadoresVisibles.length === 0 && (
+                <p className="text-xs text-gray-300 italic text-center py-3">Sin indicadores. Usa el botón para agregar.</p>
+              )}
+              <div className="space-y-2">
+                {indicadoresVisibles.map(ind => (
+                  <FilaIndicador key={ind._key} indicador={ind}
+                    onCambio={(patch) => actualizarIndicador(ind._key, patch)}
+                    onToggle={() => toggleIndicador(ind._key)}
+                    onEliminar={() => eliminarIndicador(ind._key)}
+                  />
+                ))}
+              </div>
+            </Section>
+
+            {/* ── SECCIÓN: Estructura ── */}
+            <Section titulo="Estructura del proyecto">
+              <p className="text-xs text-gray-400 mb-1">Administra las etapas y acciones del proyecto.</p>
+
+              {/* Etapas existentes */}
+              {estructuraEtapas.map((et, idx) => (
+                <div key={et.id} className="border border-gray-200 rounded-lg overflow-hidden">
+                  <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 cursor-pointer"
+                    onClick={() => {
+                      const abrir = etapaExpandida !== et.id;
+                      setEtapaExpandida(abrir ? et.id : null);
+                      if (abrir && !accionesPorEtapa[et.id]) cargarAccionesEtapa(et.id);
+                    }}>
+                    <span className="w-5 h-5 bg-guinda-500 text-white rounded text-[10px] font-bold flex items-center justify-center flex-shrink-0">{idx + 1}</span>
+                    <span className="flex-1 text-sm font-medium text-gray-800 truncate">{et.nombre}</span>
+                    <span className="text-[10px] text-gray-400">{et.total_acciones || 0} acc.</span>
+                    {permisos.puedeEliminar && (
+                      <button type="button" onClick={e => { e.stopPropagation(); eliminarEtapaRapida(et.id); }}
+                        className="text-gray-300 hover:text-red-500 p-0.5"><Trash2 size={13} /></button>
+                    )}
+                    <ChevronDown size={14} className={`text-gray-400 transition-transform ${etapaExpandida === et.id ? 'rotate-180' : ''}`} />
+                  </div>
+                  {etapaExpandida === et.id && (
+                    <div className="px-3 py-2 space-y-1 border-t border-gray-100">
+                      {(accionesPorEtapa[et.id] || []).map(acc => (
+                        <div key={acc.id} className="flex items-center gap-2 py-1 pl-2 border-l-2 border-guinda-200">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            acc.estado === 'Completada' ? 'bg-emerald-500' : acc.estado === 'En_proceso' ? 'bg-orange-400' : 'bg-gray-300'
+                          }`} />
+                          <span className="flex-1 text-xs text-gray-700 truncate">{acc.nombre}</span>
+                          <span className="text-[10px] text-gray-400">{parseFloat(acc.avance_efectivo ?? acc.porcentaje_avance ?? 0).toFixed(0)}%</span>
+                          {permisos.puedeEliminar && (
+                            <button type="button" onClick={() => eliminarAccionRapida(acc.id, et.id)}
+                              className="text-gray-300 hover:text-red-500 p-0.5"><Trash2 size={11} /></button>
+                          )}
+                        </div>
+                      ))}
+                      {/* Quick-add acción */}
+                      <div className="flex items-center gap-1.5 pt-1">
+                        <input type="text" value={nuevaAccionNombre[et.id] || ''}
+                          onChange={e => setNuevaAccionNombre(prev => ({ ...prev, [et.id]: e.target.value }))}
+                          onKeyDown={e => e.key === 'Enter' && agregarAccionRapida(et.id)}
+                          className="flex-1 text-xs border border-gray-200 rounded px-2 py-1 focus:border-guinda-400 outline-none"
+                          placeholder="+ Nueva acción…" />
+                        <button type="button" onClick={() => agregarAccionRapida(et.id)}
+                          disabled={creandoAccion[et.id]}
+                          className="text-xs text-guinda-600 hover:text-guinda-700 font-medium px-1.5 py-1">
+                          <Plus size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {/* Quick-add etapa */}
+              <div className="flex items-center gap-2">
+                <input type="text" value={nuevaEtapaNombre}
+                  onChange={e => setNuevaEtapaNombre(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && agregarEtapaRapida()}
+                  className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 focus:border-guinda-400 outline-none"
+                  placeholder="+ Nueva etapa…" />
+                <button type="button" onClick={agregarEtapaRapida} disabled={creandoEtapa}
+                  className="btn-secondary text-xs flex items-center gap-1">
+                  <Plus size={13} /> Agregar
+                </button>
+              </div>
+
+              {/* Acciones directas */}
+              {accionesDirectasModal.length > 0 && (
+                <div className="mt-2">
+                  <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-1">Acciones directas</p>
+                  {accionesDirectasModal.map(acc => (
+                    <div key={acc.id} className="flex items-center gap-2 py-1 pl-2 border-l-2 border-orange-200">
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                        acc.estado === 'Completada' ? 'bg-emerald-500' : acc.estado === 'En_proceso' ? 'bg-orange-400' : 'bg-gray-300'
+                      }`} />
+                      <span className="flex-1 text-xs text-gray-700 truncate">{acc.nombre}</span>
+                      {permisos.puedeEliminar && (
+                        <button type="button" onClick={async () => {
+                          if (!confirm('¿Eliminar esta acción directa?')) return;
+                          try { await accionesApi.eliminarAccion(acc.id); cargarAccionesDirectasModal(); } catch {}
+                        }} className="text-gray-300 hover:text-red-500 p-0.5"><Trash2 size={11} /></button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-1.5">
+                <input type="text" value={nuevaAccionNombre['directa'] || ''}
+                  onChange={e => setNuevaAccionNombre(prev => ({ ...prev, directa: e.target.value }))}
+                  onKeyDown={e => e.key === 'Enter' && agregarAccionDirectaRapida()}
+                  className="flex-1 text-xs border border-gray-200 rounded px-2 py-1 focus:border-guinda-400 outline-none"
+                  placeholder="+ Acción directa (sin etapa)…" />
+                <button type="button" onClick={agregarAccionDirectaRapida}
+                  disabled={creandoAccion['directa']}
+                  className="text-xs text-guinda-600 hover:text-guinda-700 font-medium px-1.5 py-1">
+                  <Plus size={13} />
+                </button>
+              </div>
+            </Section>
+
+            {/* ── SECCIÓN: Etiquetas (con sugerencias) ── */}
+            <Section titulo="Etiquetas">
+              <EtiquetasChipInput value={datos.etiquetas} onChange={v => actualizar('etiquetas', v)} />
+            </Section>
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className="flex justify-end gap-3 px-6 py-4 border-t border-gray-200 flex-shrink-0 bg-white">
+          <button type="button" onClick={onCerrar} className="btn-secondary">Cancelar</button>
+          <button type="button" onClick={guardar} disabled={enviando || !datos.nombre.trim()}
+            className="btn-primary">
+            {enviando ? 'Guardando…' : 'Guardar cambios'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Section({ titulo, children }) {
+  return (
+    <div>
+      <h3 className="text-sm font-semibold text-gray-700 mb-3 pb-1.5 border-b border-gray-100">{titulo}</h3>
+      <div className="space-y-3">{children}</div>
+    </div>
+  );
+}
+
+function FilaIndicador({ indicador, onCambio, onToggle, onEliminar }) {
+  const etiquetaTipo = TIPOS_INDICADOR.find(t => t.valor === indicador.tipo)?.etiqueta || indicador.tipo;
+  const etiquetaUnidad = etiquetaUnidadIndicador(indicador) || '#';
+
+  return (
+    <div className="border border-gray-200 rounded-lg overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 bg-gray-50 cursor-pointer" onClick={onToggle}>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-xs font-bold text-guinda-500 flex-shrink-0">{indicador._esNuevo ? '✦' : '#'}</span>
+          <span className="text-sm font-medium text-gray-800 truncate">
+            {indicador.nombre || 'Nuevo indicador'}
+          </span>
+          {indicador.meta_global && (
+            <span className="text-xs text-gray-400 flex-shrink-0">
+              Meta: {Number(indicador.meta_global).toLocaleString()} {etiquetaUnidad}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">{etiquetaTipo}</span>
+          <button type="button" onClick={e => { e.stopPropagation(); onEliminar(); }}
+            className="text-gray-400 hover:text-red-500 p-0.5 rounded">
+            <Trash2 size={13} />
+          </button>
+          {indicador._abierto ? <ChevronUp size={14} className="text-gray-400" /> : <ChevronDown size={14} className="text-gray-400" />}
+        </div>
+      </div>
+
+      {indicador._abierto && (
+        <div className="p-4 border-t border-gray-100">
+          <CamposIndicadorProyecto indicador={indicador} onCambio={onCambio} />
+        </div>
+      )}
+    </div>
+  );
+}

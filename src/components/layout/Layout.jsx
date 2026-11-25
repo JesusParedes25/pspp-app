@@ -1,0 +1,65 @@
+/**
+ * ARCHIVO: Layout.jsx
+ * PROPÓSITO: Layout principal con sidebar y header que envuelve todas las páginas.
+ *
+ * NOTA TÉCNICA: Outlet de React Router
+ * ─────────────────────────────────────────────────────────────────
+ * React Router v6 usa <Outlet /> para renderizar la ruta hija activa
+ * dentro de un layout compartido. El Layout define la estructura
+ * visual (sidebar + header + contenido) y el Outlet se reemplaza
+ * dinámicamente por la página correspondiente a la URL actual.
+ * Esto evita duplicar sidebar y header en cada página.
+ *
+ * NOTA TÉCNICA: una sola fuente para el contador de la campanita
+ * ─────────────────────────────────────────────────────────────────
+ * El resumen de pendientes (useCentroNotificaciones) se pide UNA vez
+ * aquí, no dentro de Header. Si cada quien lo pidiera por su cuenta, al
+ * aceptar una invitación desde el modal el número de la campanita
+ * seguiría mostrando el valor viejo hasta el siguiente polling (30s) —
+ * el usuario acaba de resolver algo y el aviso que se lo recordaba
+ * sigue ahí, como si no hubiera pasado nada. Con una sola instancia,
+ * cualquiera que resuelva algo llama a `recargarResumen` y la campanita
+ * se pone al día al instante. Outlet context lo lleva hasta las páginas
+ * (Notificaciones, por ejemplo) sin tener que pasarlo prop por prop a
+ * través de rutas que no lo necesitan. `notificacionesSinLeer` es el
+ * mismo `total` ya calculado, expuesto con otro nombre para quien solo
+ * quiere leerlo (la tarjeta de Notificaciones en Inicio.jsx) sin pedirlo
+ * de nuevo con una segunda instancia de useCentroNotificaciones.
+ *
+ * El mismo criterio aplica a useMisPendientes (GET /agenda): antes vivía
+ * dentro de Sidebar, e Inicio.jsx pedía /agenda otra vez por su cuenta
+ * para la tarjeta "Mis actividades" — dos peticiones a la vez, cada
+ * carga del Inicio. Se pide UNA vez aquí, el badge del sidebar recibe
+ * `pendientesActividades` por prop (igual que `pendientesNotificaciones`)
+ * y la tarjeta de Inicio recibe `misActividadesResumen`/
+ * `cargandoMisActividades` por Outlet context.
+ * ─────────────────────────────────────────────────────────────────
+ */
+import { Outlet } from 'react-router-dom';
+import Sidebar from './Sidebar';
+import Header from './Header';
+import { useUI } from '../../context/UIContext';
+import { useCentroNotificaciones } from '../../hooks/useCentroNotificaciones';
+import { useMisPendientes } from '../../hooks/useMisPendientes';
+import ModalPendientesInicioSesion from '../notificaciones/ModalPendientesInicioSesion';
+import AvisoSesionPorExpirar from '../common/AvisoSesionPorExpirar';
+
+export default function Layout() {
+  const { sidebarAbierto } = useUI();
+  const { total, recargar: recargarResumen } = useCentroNotificaciones();
+  const { vencidas, resumen: misActividadesResumen, cargando: cargandoMisActividades } = useMisPendientes();
+
+  return (
+    <div className="min-h-screen flex" style={{ backgroundColor: '#F5F5F0' }}>
+      <Sidebar pendientesNotificaciones={total} pendientesActividades={vencidas} />
+      <div className={`flex-1 min-w-0 flex flex-col transition-all duration-300 ${sidebarAbierto ? 'ml-64' : 'ml-16'}`}>
+        <Header pendientes={total} />
+        <main className="flex-1 min-w-0 p-6 overflow-auto">
+          <Outlet context={{ recargarResumen, notificacionesSinLeer: total, misActividadesResumen, cargandoMisActividades }} />
+        </main>
+      </div>
+      <ModalPendientesInicioSesion onResuelto={recargarResumen} />
+      <AvisoSesionPorExpirar />
+    </div>
+  );
+}
